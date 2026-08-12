@@ -1,0 +1,10 @@
+build/
+*.o
+*.elf
+*.img
+
+# Generated from rootfs/ by `make`
+initramfs.cpio
+
+# Fetched on demand by `make bcm2710-rpi-3-b-plus.dtb`
+*.dtb
