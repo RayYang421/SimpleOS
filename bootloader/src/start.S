@@ -10,8 +10,11 @@ _start:
     mrs     x1, mpidr_el1
     and     x1, x1, #0xFF
     cbz     x1, primary
+
+/* wfi rather than wfe: nothing signals these cores, and an emulator treats wfe
+ * as a yield, so a wfe loop burns a host thread per parked core. */
 hang:
-    wfe
+    wfi
     b       hang
 
 primary:

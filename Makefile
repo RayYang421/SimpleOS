@@ -24,7 +24,17 @@ DTB        = bcm2710-rpi-3-b-plus.dtb
 DTB_URL    = https://raw.githubusercontent.com/raspberrypi/firmware/master/boot/$(DTB)
 
 QEMU       = qemu-system-aarch64
-QEMU_FLAGS = -M raspi3b -display none -serial null -serial stdio \
+# raspi3b always emulates four cores, and QEMU holds the three it is not
+# booting in a spin-table stub that never halts. Those spinning cores starve
+# QEMU's own timer delivery, so the guest sees core-timer interrupts arrive up
+# to a second after their deadline -- entirely outside the kernel's control.
+#
+# thread=single stops them from burning a host thread each, and icount drives
+# the guest clock from instructions retired rather than host wall time, which
+# makes timer delivery exact instead of dependent on how loaded the host is.
+# Without these, the timing checks in tools/test_bootloader.py flake.
+QEMU_ACCEL = -accel tcg,thread=single -icount shift=auto,sleep=on
+QEMU_FLAGS = -M raspi3b $(QEMU_ACCEL) -display none -serial null -serial stdio \
              -initrd $(INITRAMFS) -dtb $(DTB)
 
 all: $(KERNEL) $(INITRAMFS)
@@ -71,7 +81,7 @@ run-bootloader: $(BOOTLOADER) $(INITRAMFS) $(DTB)
 # Exposes the emulated UART as a pty so send_kernel.py can drive it, matching
 # how a real board is flashed over a USB serial adapter.
 run-pty: $(BOOTLOADER) $(INITRAMFS) $(DTB)
-	$(QEMU) -M raspi3b -display none -serial null -serial pty \
+	$(QEMU) -M raspi3b $(QEMU_ACCEL) -display none -serial null -serial pty \
 	        -initrd $(INITRAMFS) -dtb $(DTB) -kernel $(BOOTLOADER)
 
 debug: $(KERNEL) $(INITRAMFS) $(DTB)

@@ -5,7 +5,7 @@
 
 /* Bump allocator for early boot: hands out 16-byte-aligned blocks from a fixed
  * heap carved out by the linker script. There is deliberately no free() --
- * lab 2 only needs continuous allocation that is never reclaimed. */
+ * nothing here ever needs reclaiming. */
 void *simple_malloc(size_t size);
 
 /* Bytes handed out so far and total heap capacity, for the shell's report. */
