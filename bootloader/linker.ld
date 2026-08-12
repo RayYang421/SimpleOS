@@ -1,14 +1,25 @@
 
-SECTIONS{
-    . = 0x60000;    /*bootloader addr*/
+ENTRY(_start)
+
+SECTIONS
+{
+    . = 0x60000;
+
+    __bootloader_start = .;
+
     .text : {
-        KEEP(*(.text.boot))
-        *(.text)
+        KEEP(*(.text.boot))   /* _start must be the first byte of the image */
+        *(.text .text.*)
     }
-    .rodata : { *(.rodata) }
-    .data   : { *(.data) }
-    . = ALIGN(8);
+
+    .rodata : { *(.rodata .rodata.*) }
+    .data   : { *(.data .data.*) }
+
+    . = ALIGN(16);
     __bss_start = .;
-    .bss : { *(.bss) *(COMMON) }
+    .bss : { *(.bss .bss.*) *(COMMON) }
+    . = ALIGN(16);
     __bss_end = .;
+
+    __bootloader_end = .;
 }

@@ -1,0 +1,14 @@
+# Raspberry Pi 3 firmware configuration.
+#
+# The bootloader relocates itself to 0x60000 at runtime (see
+# bootloader/src/start.S), so kernel_address is not strictly required -- it is
+# kept here because it saves the relocation copy and matches the lab's
+# suggested setup.
+kernel_address=0x60000
+kernel=bootloader.img
+arm_64bit=1
+
+# Where the firmware places the initial ramdisk. The kernel does not hardcode
+# this: it reads /chosen/linux,initrd-start out of the devicetree, and only
+# falls back to a compiled-in default if no devicetree was passed.
+initramfs initramfs.cpio 0x20000000

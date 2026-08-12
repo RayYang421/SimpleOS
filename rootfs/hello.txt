@@ -1,0 +1,2 @@
+Hello from the initial ramdisk!
+This file lives inside initramfs.cpio.

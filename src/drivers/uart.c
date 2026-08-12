@@ -34,7 +34,7 @@ void uart_init(void) {
     mmio_write(AUX_MU_LCR, 3);    /* 8-bit mode */
     mmio_write(AUX_MU_MCR, 0);    /* no auto flow control */
     mmio_write(AUX_MU_BAUD, 270); /* 115200 baud @ 250MHz */
-    mmio_write(AUX_MU_IIR, 6);    /* no FIFO */
+    mmio_write(AUX_MU_IIR, 6);    /* clear both FIFOs */
     mmio_write(AUX_MU_CNTL, 3);   /* enable TX/RX */
 }
 
@@ -46,12 +46,46 @@ void uart_send(char c) {
 char uart_getc(void) {
     while (!(mmio_read(AUX_MU_LSR) & 0x01)) { } /* wait data ready */
     char c = mmio_read(AUX_MU_IO) & 0xFF;
+    /* Terminals send CR for Enter; the shell reasons in terms of '\n'. */
     return c == '\r' ? '\n' : c;
+}
+
+char uart_getc_raw(void) {
+    while (!(mmio_read(AUX_MU_LSR) & 0x01)) { }
+    return mmio_read(AUX_MU_IO) & 0xFF;
+}
+
+int uart_poll(void) {
+    return (mmio_read(AUX_MU_LSR) & 0x01) ? 1 : 0;
 }
 
 void uart_puts(const char *s) {
     while (*s) {
-        if (*s == '\n') uart_send('\r'); /* handle rn alignment */
+        if (*s == '\n') uart_send('\r'); /* terminals need CRLF */
         uart_send(*s++);
     }
+}
+
+void uart_write(const char *buf, size_t len) {
+    for (size_t i = 0; i < len; i++) {
+        if (buf[i] == '\n') uart_send('\r');
+        uart_send(buf[i]);
+    }
+}
+
+void uart_hex(uint64_t v) {
+    uart_puts("0x");
+    for (int shift = 60; shift >= 0; shift -= 4) {
+        unsigned int d = (v >> shift) & 0xF;
+        uart_send(d < 10 ? '0' + d : 'a' + d - 10);
+    }
+}
+
+void uart_dec(uint64_t v) {
+    char buf[21];
+    int i = 0;
+
+    if (v == 0) { uart_send('0'); return; }
+    while (v > 0) { buf[i++] = '0' + (v % 10); v /= 10; }
+    while (i > 0) uart_send(buf[--i]);
 }
