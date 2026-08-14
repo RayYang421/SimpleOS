@@ -143,13 +143,88 @@ uint64_t fdt_get_base(void) { return fdt_base; }
  * initramfs line in config.txt) and is a u32 or u64 depending on the writer. */
 static void initramfs_callback(const char *node, const char *prop,
                                const void *val, uint32_t len, void *arg) {
-    (void)node;
     uint64_t *found = (uint64_t *)arg;
 
+    if (strcmp(node, "chosen") != 0) return;
     if (strcmp(prop, "linux,initrd-start") != 0) return;
 
     if (len == 4)      *found = fdt_be32(val);
     else if (len == 8) *found = fdt_be64(val);
+}
+
+uint64_t fdt_get_totalsize(void) {
+    const struct fdt_header *h = fdt_check(fdt_base);
+    return h ? fdt_be32(&h->totalsize) : 0;
+}
+
+/* A memory node is named exactly "memory" or "memory@<address>"; matching on
+ * the prefix alone would also pick up unrelated nodes such as
+ * "memory-controller". */
+int fdt_is_memory_node(const char *node) {
+    if (strncmp(node, "memory", 6) != 0) return 0;
+    return node[6] == '\0' || node[6] == '@';
+}
+
+/* Reads one cell pair out of a reg property. The Rpi3 root declares one
+ * address cell and one size cell, so each pair is eight bytes. */
+struct memory_query { uint64_t base, size; int found; };
+
+static void memory_query_cb(const char *node, const char *prop,
+                            const void *val, uint32_t len, void *arg) {
+    struct memory_query *q = (struct memory_query *)arg;
+
+    if (q->found) return;
+    if (!fdt_is_memory_node(node)) return;
+    if (strcmp(prop, "reg") != 0 || len < 8) return;
+
+    q->base  = fdt_be32(val);
+    q->size  = fdt_be32((const uint8_t *)val + 4);
+    q->found = 1;
+}
+
+int fdt_get_memory(uint64_t *base, uint64_t *size) {
+    struct memory_query q = { 0, 0, 0 };
+
+    if (fdt_traverse(memory_query_cb, &q) != 0 || !q.found) return -1;
+
+    /* The size is filled in by the firmware at boot: the blob shipped on disk
+     * carries zero. Treating that as the answer would leave the page allocator
+     * with no frames at all, so fall back instead. */
+    if (q.size == 0) return -1;
+
+    if (base) *base = q.base;
+    if (size) *size = q.size;
+    return 0;
+}
+
+struct initrd_query { uint64_t start, end; int have_start, have_end; };
+
+static void initrd_query_cb(const char *node, const char *prop,
+                            const void *val, uint32_t len, void *arg) {
+    struct initrd_query *q = (struct initrd_query *)arg;
+    uint64_t v;
+
+    /* These live in /chosen; accepting them from anywhere would let an
+     * unrelated node redirect the initramfs. */
+    if (strcmp(node, "chosen") != 0) return;
+
+    if (len == 4)      v = fdt_be32(val);
+    else if (len == 8) v = fdt_be64(val);
+    else return;
+
+    if (strcmp(prop, "linux,initrd-start") == 0) { q->start = v; q->have_start = 1; }
+    else if (strcmp(prop, "linux,initrd-end") == 0) { q->end = v; q->have_end = 1; }
+}
+
+int fdt_get_initrd(uint64_t *start, uint64_t *end) {
+    struct initrd_query q = { 0, 0, 0, 0 };
+
+    if (fdt_traverse(initrd_query_cb, &q) != 0) return -1;
+    if (!q.have_start || !q.have_end) return -1;
+
+    if (start) *start = q.start;
+    if (end)   *end   = q.end;
+    return 0;
 }
 
 void fdt_init(uint64_t dtb_addr) {

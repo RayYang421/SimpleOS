@@ -28,4 +28,18 @@ int fdt_traverse(fdt_callback cb, void *arg);
  * big-endian regardless of the CPU's byte order. */
 uint32_t fdt_be32(const void *p);
 
+/* Total size of the blob, so it can be reserved. 0 if there is no devicetree. */
+uint64_t fdt_get_totalsize(void);
+
+/* 1 if node names a /memory node ("memory" or "memory@..."). */
+int fdt_is_memory_node(const char *node);
+
+/* Usable RAM from the /memory node. Returns 0 on success, -1 if the
+ * devicetree does not describe it. */
+int fdt_get_memory(uint64_t *base, uint64_t *size);
+
+/* Where the loader put the initial ramdisk, from /chosen. Returns 0 on
+ * success, -1 if the properties are absent. */
+int fdt_get_initrd(uint64_t *start, uint64_t *end);
+
 #endif

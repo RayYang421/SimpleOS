@@ -26,6 +26,14 @@ void *simple_malloc(size_t size) {
     return block;
 }
 
+/* The whole heap, not just the part handed out so far: the buddy system must
+ * not be given the unused tail, or a later simple_malloc would collide with
+ * memory it had already allocated to someone else. */
+void startup_alloc_range(uint64_t *start, uint64_t *end) {
+    if (start) *start = (uint64_t)(uintptr_t)__heap_start;
+    if (end)   *end   = (uint64_t)(uintptr_t)__heap_end;
+}
+
 void simple_malloc_stats(size_t *used, size_t *total) {
     char *cur = brk ? brk : __heap_start;
     if (used)  *used  = (size_t)(cur - __heap_start);

@@ -172,6 +172,9 @@ def main():
             ("timer", 5.0), ("timer", 0.6),
             ("tasktest", 4.0),
             ("irqinfo", 0.8),
+            ("meminfo", 1.0),
+            ("memtest", 2.5),
+            ("palloc 2", 0.8),
         ]
 
         print("\nDriving the shell:")
@@ -222,6 +225,13 @@ def main():
               "spsr shows the trap came from EL0t with IRQ unmasked", out)
         check("user program exited" in out and "returned to the kernel, now at EL1" in out,
               "kernel resumed cleanly after the user program exited", out)
+        # The EL0 program leaves x19 clobbered, and leave_el0 returns straight
+        # into C rather than through eret. If the callee-saved registers are not
+        # restored, the shell resumes with its own state corrupted and every
+        # later command is mangled.
+        after_exc = out.split("returned to the kernel, now at EL1", 1)
+        check(len(after_exc) == 2 and "Unknown command" not in after_exc[1],
+              "the shell's registers survived the excursion to EL0", out)
 
         # --- lab 3: timers ---
         print("\n  -- timers --")
@@ -269,6 +279,46 @@ def main():
         sent = re.findall(r"bytes sent      : (\d+)", out)
         check(bool(sent) and int(sent[-1]) > 0,
               f"output went out through the TX ring buffer (bytes={sent})", out)
+
+        # --- lab 4: startup allocation and reserved memory ---
+        print("\n  -- memory reservation --")
+        for region in ("spin tables", "kernel stack", "kernel image",
+                       "startup allocator", "devicetree blob", "initramfs"):
+            check(region in out, f"startup reserved the {region}", out)
+
+        frames = re.search(r"frames: (\d+) total, (\d+) free, (\d+) reserved", out)
+        check(frames is not None, "the buddy system reported its frame counts", out)
+        total, free_f, reserved = (int(g) for g in frames.groups())
+        check(total - reserved == free_f,
+              f"every frame is accounted for: {total} total - {reserved} reserved "
+              f"== {free_f} free", out)
+        check(reserved > 0, f"critical regions are actually held back ({reserved} frames)", out)
+
+        # --- lab 4: buddy split and merge ---
+        print("\n  -- buddy system --")
+        splits = re.findall(r"split, released buddy 0x(\w+) order (\d+)", out)
+        merges = re.findall(r"merge 0x\w+ \+ 0x\w+ -> order (\d+)", out)
+        check(len(splits) >= 5,
+              f"a large block was split down to size, releasing each buddy "
+              f"({len(splits)} splits)", out)
+        check([int(o) for _, o in splits[:5]] == [4, 3, 2, 1, 0],
+              f"splits step down one order at a time {[int(o) for _, o in splits[:5]]}", out)
+        check(len(merges) >= 5, f"freed buddies coalesced back up ({len(merges)} merges)", out)
+        check([int(o) for o in merges[:5]] == [1, 2, 3, 4, 5],
+              f"merges step up one order at a time {[int(o) for o in merges[:5]]}", out)
+
+        # --- lab 4: dynamic allocator ---
+        print("\n  -- dynamic allocator --")
+        check("24-byte chunks share a frame: yes" in out,
+              "same-bin allocations are cut from one page frame", out)
+        check("100-byte chunk uses a different bin: yes" in out,
+              "a larger request lands in a different bin", out)
+        check("is empty, returning it to the buddy system" in out,
+              "a pool frame goes back to the buddy system once fully freed", out)
+        check("leaked 0 frames" in out,
+              "the whole allocator demo leaked nothing", out)
+        check(re.search(r"got 0x\w+\s+16 KiB", out) is not None,
+              "palloc handed out a 2^2-frame block", out)
 
         print("\n--- full transcript " + "-" * 45)
         print(out)

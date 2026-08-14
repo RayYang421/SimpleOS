@@ -12,6 +12,11 @@ void *cpio_get_base(void);
  * archive, 0 otherwise -- lets the shell explain itself instead of faulting. */
 int cpio_valid(void);
 
+/* Total bytes the archive occupies, including the trailer. 0 if there is no
+ * archive. Used to reserve the initramfs when the devicetree does not say
+ * where it ends. */
+size_t cpio_size(void);
+
 void cpio_ls(void);
 
 /* Returns 0 when path is found, filling in the data pointer and size,

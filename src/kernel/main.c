@@ -5,6 +5,7 @@
 #include "irq.h"
 #include "timer.h"
 #include "exception.h"
+#include "mm.h"
 
 void main(uint64_t dtb_addr) {
     uart_init();
@@ -37,6 +38,8 @@ void main(uint64_t dtb_addr) {
     uart_hex((uint64_t)(uintptr_t)cpio_get_base());
     if (!cpio_valid()) uart_puts(" (empty)");
     uart_puts("\n");
+
+    mem_init();
 
     shell();
 }

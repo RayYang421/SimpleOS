@@ -9,6 +9,7 @@
 #include "timer.h"
 #include "task.h"
 #include "exception.h"
+#include "page.h"
 
 #define CMD_MAX   256
 #define ARGV_MAX  8
@@ -84,6 +85,12 @@ static void cmd_help(void) {
     uart_puts("setTimeout <msg> <secs>  : print <msg> after <secs> seconds\n");
     uart_puts("irqinfo                  : interrupt, timer and task statistics\n");
     uart_puts("tasktest                 : show a timer task preempting a long one\n");
+    uart_puts("meminfo                  : allocator statistics\n");
+    uart_puts("memtest                  : demo split, merge, chunking and reuse\n");
+    uart_puts("palloc <order>           : allocate 2^order page frames\n");
+    uart_puts("pfree <addr>             : free a page block\n");
+    uart_puts("kmalloc <size>           : allocate from the dynamic allocator\n");
+    uart_puts("kfree <addr>             : free a dynamic allocation\n");
     uart_puts("reboot                   : reset the board\n");
 }
 
@@ -133,7 +140,7 @@ static void cmd_dtb(void) {
 static void memory_callback(const char *node, const char *prop,
                             const void *val, uint32_t len, void *arg) {
     (void)arg;
-    if (strncmp(node, "memory", 6) != 0) return;
+    if (!fdt_is_memory_node(node)) return;
     if (strcmp(prop, "reg") != 0 || len < 8) return;
 
     uart_puts("  memory: base ");
@@ -270,6 +277,158 @@ static void cmd_irqinfo(void) {
     uart_puts("\n");
 }
 
+static void cmd_meminfo(void) {
+    size_t used, total;
+    simple_malloc_stats(&used, &total);
+
+    uart_puts("startup allocator: ");
+    uart_dec(used);
+    uart_puts(" / ");
+    uart_dec(total);
+    uart_puts(" bytes used\n");
+
+    page_report();
+    kmalloc_report();
+}
+
+static void cmd_palloc(int argc, char **argv) {
+    uint64_t order;
+
+    if (argc < 2 || !parse_uint(argv[1], &order) || order > MAX_ORDER) {
+        uart_puts("usage: palloc <order>   (0..");
+        uart_dec(MAX_ORDER);
+        uart_puts(", allocates 2^order frames)\n");
+        return;
+    }
+
+    int was = page_set_log(1);
+    void *p = page_alloc((int)order);
+    page_set_log(was);
+
+    if (p == 0) {
+        uart_puts("page_alloc failed\n");
+        return;
+    }
+
+    uart_puts("got ");
+    uart_hex((uint64_t)(uintptr_t)p);
+    uart_puts("  ");
+    uart_dec((1UL << order) * (PAGE_SIZE / 1024));
+    uart_puts(" KiB\n");
+}
+
+static void cmd_pfree(int argc, char **argv) {
+    uint64_t addr;
+
+    if (argc < 2 || !parse_uint(argv[1], &addr)) {
+        uart_puts("usage: pfree <address>\n");
+        return;
+    }
+
+    int was = page_set_log(1);
+    page_free((void *)(uintptr_t)addr);
+    page_set_log(was);
+}
+
+static void cmd_kmalloc(int argc, char **argv) {
+    uint64_t size;
+
+    if (argc < 2 || !parse_uint(argv[1], &size)) {
+        uart_puts("usage: kmalloc <size>\n");
+        return;
+    }
+
+    int was = kmalloc_set_log(1);
+    void *p = kmalloc((size_t)size);
+    kmalloc_set_log(was);
+
+    if (p == 0) uart_puts("kmalloc failed\n");
+}
+
+static void cmd_kfree(int argc, char **argv) {
+    uint64_t addr;
+
+    if (argc < 2 || !parse_uint(argv[1], &addr)) {
+        uart_puts("usage: kfree <address>\n");
+        return;
+    }
+
+    int was = kmalloc_set_log(1);
+    kfree((void *)(uintptr_t)addr);
+    kmalloc_set_log(was);
+}
+
+/* Walks through the behaviour the allocators are meant to show: a block being
+ * split down to size, the halves merging back on free, several chunks coming
+ * out of one page frame, and that frame going back to the buddy system once
+ * the last chunk is returned. The frame count either side proves nothing
+ * leaked. */
+#define DEMO_HOLD_MAX  64
+#define DEMO_DRAIN_TO  4
+
+static void *demo_held[DEMO_HOLD_MAX];
+
+static void cmd_memtest(void) {
+    uint64_t before, after;
+    page_stats(0, &before, 0);
+
+    /* Startup leaves small blocks free around the reserved regions, so a small
+     * request would be satisfied outright and never split anything. Taking
+     * every exact-size block below DEMO_DRAIN_TO first forces the next request
+     * to come out of a larger block. Each of these finds an exact match, so
+     * draining does not itself split. */
+    int quiet = page_set_log(0);
+    int held = 0;
+    for (int order = 0; order <= DEMO_DRAIN_TO && held < DEMO_HOLD_MAX; order++) {
+        int n = page_order_count(order);
+        for (int i = 0; i < n && held < DEMO_HOLD_MAX; i++) {
+            void *p = page_alloc(order);
+            if (p == 0) break;
+            demo_held[held++] = p;
+        }
+    }
+    page_set_log(1);
+    int klog = kmalloc_set_log(1);
+
+    uart_puts("\n[1] page allocator: one frame, taken from a larger block\n");
+    void *small = page_alloc(0);
+
+    uart_puts("\n[2] page allocator: the same frame freed, buddies merging back\n");
+    page_free(small);
+
+    uart_puts("\n[3] dynamic allocator: chunks cut from one page frame\n");
+    void *x = kmalloc(24);
+    void *y = kmalloc(24);
+    void *z = kmalloc(100);
+
+    uint64_t px = (uint64_t)(uintptr_t)x & ~(PAGE_SIZE - 1);
+    uint64_t py = (uint64_t)(uintptr_t)y & ~(PAGE_SIZE - 1);
+    uint64_t pz = (uint64_t)(uintptr_t)z & ~(PAGE_SIZE - 1);
+    uart_puts("  24-byte chunks share a frame: ");
+    uart_puts(px == py ? "yes\n" : "no\n");
+    uart_puts("  100-byte chunk uses a different bin: ");
+    uart_puts(pz != px ? "yes\n" : "no\n");
+
+    uart_puts("\n[4] dynamic allocator: emptied frames go back to the buddy system\n");
+    kfree(x);
+    kfree(y);
+    kfree(z);
+
+    kmalloc_set_log(klog);
+    page_set_log(0);
+    while (held > 0) page_free(demo_held[--held]);
+    page_set_log(quiet);
+
+    page_stats(0, &after, 0);
+    uart_puts("\nfree frames before ");
+    uart_dec(before);
+    uart_puts(", after ");
+    uart_dec(after);
+    uart_puts(" -> leaked ");
+    uart_dec(before >= after ? before - after : 0);
+    uart_puts(" frames\n");
+}
+
 static void cmd_reboot(void) {
     uart_puts("rebooting...\n");
     uart_flush();
@@ -300,6 +459,12 @@ void shell(void) {
         else if (strcmp(argv[0], "exc")    == 0) cmd_exc();
         else if (strcmp(argv[0], "irqinfo") == 0) cmd_irqinfo();
         else if (strcmp(argv[0], "tasktest") == 0) cmd_tasktest();
+        else if (strcmp(argv[0], "meminfo") == 0) cmd_meminfo();
+        else if (strcmp(argv[0], "memtest") == 0) cmd_memtest();
+        else if (strcmp(argv[0], "palloc")  == 0) cmd_palloc(argc, argv);
+        else if (strcmp(argv[0], "pfree")   == 0) cmd_pfree(argc, argv);
+        else if (strcmp(argv[0], "kmalloc") == 0) cmd_kmalloc(argc, argv);
+        else if (strcmp(argv[0], "kfree")   == 0) cmd_kfree(argc, argv);
         else if (strcmp(argv[0], "reboot") == 0) cmd_reboot();
         else if (strcmp(argv[0], "setTimeout") == 0) cmd_set_timeout(argc, argv);
         else if (strcmp(argv[0], "timer")  == 0) {

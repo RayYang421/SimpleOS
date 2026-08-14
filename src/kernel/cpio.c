@@ -100,6 +100,28 @@ int cpio_valid(void) {
            strncmp(cpio_base, "070702", 6) == 0;
 }
 
+size_t cpio_size(void) {
+    if (!cpio_valid()) return 0;
+
+    const char *ptr = cpio_base;
+    const char *next;
+
+    while ((next = cpio_next(ptr, 0, 0, 0)) != 0) ptr = next;
+
+    /* cpio_next stops at the trailer without consuming it, so add the trailer
+     * entry's own header and name to get the true end. */
+    const struct cpio_newc_header *h = (const struct cpio_newc_header *)ptr;
+    uint32_t namesize;
+    if (parse_hex8(h->namesize, &namesize))
+        ptr += align4(CPIO_HEADER_SIZE + namesize);
+
+    /* cpio pads the whole archive out to a 512-byte block. Reporting the
+     * trailer's end would leave that padding outside the reserved range, and
+     * with it whatever shares the final page. */
+    size_t used = (size_t)(ptr - cpio_base);
+    return (used + 511u) & ~511UL;
+}
+
 void cpio_ls(void) {
     if (!cpio_valid()) {
         uart_puts("ls: no initramfs loaded\n");
