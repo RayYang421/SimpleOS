@@ -2,6 +2,7 @@
 #include "timer.h"
 #include "task.h"
 #include "uart.h"
+#include "sched.h"
 
 void set_exception_vectors(void);   /* vectors.S */
 
@@ -41,6 +42,11 @@ void irq_entry(void) {
 
     /* Deferred work runs here, with interrupts enabled. */
     task_run_pending();
+
+    /* Preemption point: the current thread has had its slice, and its state is
+     * safely on its own kernel stack, so switching here is transparent to
+     * whatever was interrupted. */
+    sched_tick();
 
     /* Mask again before returning: load_all and eret must not be interrupted
      * part-way through restoring the frame. eret puts back the interrupted

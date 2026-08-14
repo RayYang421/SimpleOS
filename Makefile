@@ -7,7 +7,11 @@ SRCDIR   = src
 BUILDDIR = build
 INCLUDE  = include
 
-CFLAGS  = -Wall -O2 -ffreestanding -nostdinc -nostdlib -nostartfiles -I$(INCLUDE)
+# -mgeneral-regs-only keeps the compiler off the FP/SIMD registers. They are
+# trapped at EL1 by default, and GCC will happily vectorise something like a
+# large struct memset into SIMD stores, which faults. Forbidding them also
+# means a context switch never has to save them.
+CFLAGS  = -Wall -O2 -ffreestanding -nostdinc -nostdlib -nostartfiles -mgeneral-regs-only -I$(INCLUDE)
 # Bare-metal images have no separate loadable segments; the warning is noise.
 LDFLAGS = --no-warn-rwx-segments
 
@@ -20,6 +24,12 @@ KERNEL     = $(BUILDDIR)/kernel8.img
 BOOTLOADER = bootloader/build/bootloader.img
 INITRAMFS  = initramfs.cpio
 ROOTFS     = rootfs
+
+# User programs, built as flat binaries and dropped into the initramfs for
+# exec to load. Linked at 0 and position-independent, so the kernel can put
+# them wherever it finds room.
+USER_SRC   = $(wildcard user/*.c)
+USER_BIN   = $(patsubst user/%.c,$(ROOTFS)/%.img,$(USER_SRC))
 DTB        = bcm2710-rpi-3-b-plus.dtb
 DTB_URL    = https://raw.githubusercontent.com/raspberrypi/firmware/master/boot/$(DTB)
 
@@ -56,7 +66,13 @@ $(KERNEL): $(BUILDDIR)/kernel8.elf
 # --- initial ramdisk ---------------------------------------------------------
 # Rebuilt whenever anything under rootfs/ changes. `find .` is what produces the
 # leading "./" on every archived name, which the cpio parser accounts for.
-$(INITRAMFS): $(shell find $(ROOTFS) -type f 2>/dev/null)
+$(ROOTFS)/%.img: user/%.c user/user.ld
+	@mkdir -p $(BUILDDIR)/user
+	$(CC) $(CFLAGS) -c $< -o $(BUILDDIR)/user/$*.o
+	$(LD) $(LDFLAGS) -T user/user.ld -o $(BUILDDIR)/user/$*.elf $(BUILDDIR)/user/$*.o
+	$(OBJCOPY) -O binary $(BUILDDIR)/user/$*.elf $@
+
+$(INITRAMFS): $(USER_BIN) $(shell find $(ROOTFS) -type f 2>/dev/null)
 	cd $(ROOTFS) && find . | cpio -o -H newc > ../$(INITRAMFS)
 
 # --- devicetree --------------------------------------------------------------
@@ -98,7 +114,7 @@ send: $(KERNEL)
 	python3 tools/send_kernel.py $(PORT) $(KERNEL)
 
 clean:
-	rm -rf $(BUILDDIR) $(INITRAMFS)
+	rm -rf $(BUILDDIR) $(INITRAMFS) $(USER_BIN)
 	$(MAKE) -C bootloader clean
 
 .PHONY: all bootloader run run-bootloader run-pty debug test send clean

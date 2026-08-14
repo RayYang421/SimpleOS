@@ -97,7 +97,7 @@ static void insert(struct soft_timer *t) {
     *link = t;
 }
 
-int timer_add(void (*callback)(void *data), void *data, uint64_t after_seconds) {
+static int timer_add_ticks(void (*callback)(void *data), void *data, uint64_t ticks) {
     uint64_t daif = irq_disable_save();
 
     struct soft_timer *t = alloc_timer();
@@ -107,7 +107,7 @@ int timer_add(void (*callback)(void *data), void *data, uint64_t after_seconds) 
     }
 
     t->scheduled_ms = timer_uptime_ms();
-    t->expire       = timer_count() + after_seconds * timer_freq();
+    t->expire       = timer_count() + ticks;
     t->callback     = callback;
     t->data         = data;
     insert(t);
@@ -115,6 +115,14 @@ int timer_add(void (*callback)(void *data), void *data, uint64_t after_seconds) 
 
     irq_restore(daif);
     return 0;
+}
+
+int timer_add(void (*callback)(void *data), void *data, uint64_t after_seconds) {
+    return timer_add_ticks(callback, data, after_seconds * timer_freq());
+}
+
+int timer_add_ms(void (*callback)(void *data), void *data, uint64_t after_ms) {
+    return timer_add_ticks(callback, data, (after_ms * timer_freq()) / 1000);
 }
 
 /* Prints the message and redraws the prompt, so a timeout that lands while the
@@ -215,6 +223,13 @@ void timer_init(void) {
 
     /* Route the non-secure physical timer interrupt to this core. */
     mmio_write(CORE0_TIMER_IRQ_CTRL, 2);
+
+    /* Let EL0 read the physical counter, so a user program can time itself
+     * without a syscall. */
+    uint64_t cntkctl;
+    __asm__ volatile("mrs %0, cntkctl_el1" : "=r"(cntkctl));
+    cntkctl |= 1;
+    __asm__ volatile("msr cntkctl_el1, %0" :: "r"(cntkctl));
 
     /* Enabled but masked: nothing is scheduled yet, and an unmasked timer with
      * no deadline set would fire immediately. */

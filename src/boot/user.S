@@ -64,16 +64,19 @@ leave_el0:
     ret
 
 /* save_all/load_all preserve every register across a trap, so the counter
- * survives in x19 with no effort here. */
+ * survives in x19 with no effort here. The call number goes in x8, the same
+ * convention the real syscalls use. */
 .global user_program
 user_program:
     mov     x19, #5
 1:
+    mov     x8, #100                /* SYS_DEMO_REPORT */
     svc     #0
     sub     x19, x19, #1
     cbnz    x19, 1b
 
-    svc     #1
+    mov     x8, #101                /* SYS_DEMO_LEAVE */
+    svc     #0
 2:
     b       2b
 

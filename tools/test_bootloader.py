@@ -175,6 +175,12 @@ def main():
             ("meminfo", 1.0),
             ("memtest", 2.5),
             ("palloc 2", 0.8),
+            ("ps", 0.6),
+            ("kthread 3", 4.0),
+            ("ps", 0.6),
+            ("exec hello.img", 8.0),
+            ("exec sig.img", 4.0),
+            ("mbox", 0.8),
         ]
 
         print("\nDriving the shell:")
@@ -319,6 +325,52 @@ def main():
               "the whole allocator demo leaked nothing", out)
         check(re.search(r"got 0x\w+\s+16 KiB", out) is not None,
               "palloc handed out a 2^2-frame block", out)
+
+        # --- lab 5: threads and scheduling ---
+        print("\n  -- threads --")
+        check("<- current" in out, "ps reports the running thread", out)
+        iters = re.findall(r"thread (\d+) iteration (\d+)", out)
+        tids = sorted(set(int(t) for t, _ in iters))
+        check(len(tids) == 3, f"three kernel threads ran {tids}", out)
+        check(len(iters) == 15, f"each ran all five iterations ({len(iters)} lines)", out)
+        # Round robin: the threads take turns rather than running to completion.
+        check(len(set(t for t, _ in iters[:3])) == 3,
+              f"the scheduler round-robins between them {[t for t, _ in iters[:3]]}", out)
+        # After they exit, the idle thread reaps them.
+        tail = out.split("kthread 3", 1)[-1]
+        check(tail.count("<- current") >= 1 and "  thread 2 iteration 4" in tail,
+              "threads ran to completion and were reaped", out)
+
+        # --- lab 5: user processes, exec and fork ---
+        print("\n  -- user processes --")
+        check("user: running at EL0" in out, "exec started a program at EL0", out)
+        forked = re.search(r"user: parent forked child pid=(\d+)", out)
+        started = re.search(r"user: child started, pid=(\d+)", out)
+        check(forked is not None and started is not None and
+              forked.group(1) == started.group(1),
+              "fork returned the child pid to the parent and 0 to the child", out)
+        check("user: parent exiting" in out and "user: child exiting" in out,
+              "both processes reached their own exit", out)
+        # Interleaved ticks are the timer preempting one user process for the other.
+        ticks = re.findall(r"user: (parent|child) tick (\d+)", out)
+        who = [w for w, _ in ticks]
+        check(len(ticks) == 6 and "parent" in who and "child" in who and
+              who != ["parent"] * 3 + ["child"] * 3,
+              f"the timer preempted between the two processes {who}", out)
+
+        # --- lab 5: signals ---
+        print("\n  -- signals --")
+        check("user: handler ran" in out, "a registered handler ran in user mode", out)
+        check("user: resumed after the handler" in out,
+              "sigreturn restored the context the signal interrupted", out)
+        check("killed by SIGKILL" in out,
+              "an unhandled SIGKILL terminated the process", out)
+        check("THIS SHOULD NOT PRINT" not in out,
+              "the killed process really stopped running", out)
+
+        # --- lab 5: mailbox ---
+        check(re.search(r"board revision: 0x\w+", out) is not None,
+              "mbox_call reached the VideoCore mailbox", out)
 
         print("\n--- full transcript " + "-" * 45)
         print(out)

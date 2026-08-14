@@ -126,15 +126,34 @@ el0_sync:
     save_all
     mov     x0, sp
     bl      sync_handler
-    load_all
-    eret
+    b       exit_to_user
 
-el1h_irq:
 el0_irq:
+    save_all
+    bl      irq_entry
+    b       exit_to_user
+
+/* An interrupt taken while already in the kernel returns straight to whatever
+ * it interrupted; only a return to EL0 is a delivery point for signals. */
+el1h_irq:
     save_all
     bl      irq_entry
     load_all
     eret
+
+/* Last thing before dropping to EL0: a pending signal gets to redirect the
+ * return by rewriting the frame that is about to be restored. */
+exit_to_user:
+    mov     x0, sp
+    bl      signal_check
+    load_all
+    eret
+
+/* Entry point for a thread that has never run in user mode, and for the child
+ * of a fork: sp already points at the trap frame to return through. */
+.global ret_to_user
+ret_to_user:
+    b       exit_to_user
 
 .global set_exception_vectors
 set_exception_vectors:

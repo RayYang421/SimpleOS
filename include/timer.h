@@ -33,6 +33,9 @@ int timer_toggle_report(void);
  * Returns 0 on success, -1 if the timer pool is exhausted. */
 int timer_add(void (*callback)(void *data), void *data, uint64_t after_seconds);
 
+/* Sub-second granularity, which the scheduling tick needs. */
+int timer_add_ms(void (*callback)(void *data), void *data, uint64_t after_ms);
+
 /* Schedules a message to be printed after a delay, copying it into the timer
  * so the caller's buffer can be reused immediately. Backs the setTimeout
  * shell command. Returns 0 on success, -1 if the pool is exhausted. */

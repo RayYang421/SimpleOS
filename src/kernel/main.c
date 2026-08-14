@@ -6,6 +6,22 @@
 #include "timer.h"
 #include "exception.h"
 #include "mm.h"
+#include "sched.h"
+
+/* The lab asks for the core timer frequency shifted right by five, which is a
+ * slice of about 31 ms. */
+#define SCHED_TICK_MS 31
+
+static void shell_thread(void) {
+    shell();
+}
+
+/* Rearms itself, so there is always a timer interrupt coming and therefore
+ * always a preemption point, even when nothing else is scheduled. */
+static void preempt_tick(void *arg) {
+    (void)arg;
+    timer_add_ms(preempt_tick, 0, SCHED_TICK_MS);
+}
 
 void main(uint64_t dtb_addr) {
     uart_init();
@@ -41,5 +57,11 @@ void main(uint64_t dtb_addr) {
 
     mem_init();
 
-    shell();
+    /* Everything from here runs as a thread. The boot context becomes thread 0
+     * and then the idle thread, so the run queue is never empty. */
+    sched_init();
+    timer_add_ms(preempt_tick, 0, SCHED_TICK_MS);
+    thread_create(shell_thread);
+
+    idle_thread();
 }

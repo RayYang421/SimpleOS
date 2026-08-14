@@ -37,6 +37,12 @@ void uart_irq_complete(void);
 /* Busy-waits until every buffered byte has actually left the device. */
 void uart_flush(void);
 
+/* Called with 0 around the body of uart_puts/uart_write and 1 afterwards, so
+ * the kernel can hold off preemption for the length of a message and keep two
+ * threads from interleaving mid-line. A hook rather than a direct call because
+ * the bootloader links this driver and has no scheduler. */
+void uart_set_preempt_hook(void (*hook)(int enable));
+
 /* Bytes moved by the interrupt handler, for the shell's report. */
 void uart_async_stats(uint64_t *rx, uint64_t *tx, uint64_t *interrupts);
 

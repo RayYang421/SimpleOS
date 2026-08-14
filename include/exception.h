@@ -18,10 +18,6 @@ struct trap_frame {
     uint64_t sp_el0;
 };
 
-/* Syscall numbers, passed as the SVC immediate. */
-#define SYS_PRINT_EXC  0   /* report spsr_el1 / elr_el1 / esr_el1 */
-#define SYS_EXIT       1   /* leave EL0 and resume the kernel shell */
-
 void sync_handler(struct trap_frame *frame);
 void invalid_handler(struct trap_frame *frame, uint64_t kind);
 

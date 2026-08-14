@@ -1,8 +1,7 @@
 #include "exception.h"
 #include "uart.h"
 #include "irq.h"
-
-void leave_el0(void);   /* user.S */
+#include "syscall.h"
 
 /* Exception Syndrome Register exception classes we name explicitly. */
 #define EC_SVC_AARCH64       0x15
@@ -38,26 +37,11 @@ void sync_handler(struct trap_frame *frame) {
     uint64_t ec  = esr >> 26;
 
     if (ec == EC_SVC_AARCH64) {
-        /* For an SVC the syndrome's low 16 bits are the instruction's
-         * immediate, which is what selects the call. */
-        uint32_t number = (uint32_t)(esr & 0xFFFF);
-
-        switch (number) {
-        case SYS_PRINT_EXC:
-            report("[svc] exception taken from EL0", frame, esr);
-            return;
-
-        case SYS_EXIT:
-            uart_puts("[svc] user program exited, back to the kernel\n");
-            leave_el0();            /* discards this frame; does not return */
-            return;
-
-        default:
-            uart_puts("[svc] unknown syscall number ");
-            uart_dec(number);
-            uart_puts("\n");
-            return;
-        }
+        /* The call is selected by x8, per the lab's convention; the SVC
+         * immediate is ignored. Arguments arrive in x0.. and the result goes
+         * back in x0, both through the saved frame. */
+        syscall_dispatch(frame);
+        return;
     }
 
     invalid_handler(frame, 99);

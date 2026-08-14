@@ -10,6 +10,10 @@
 #include "task.h"
 #include "exception.h"
 #include "page.h"
+#include "sched.h"
+#include "syscall.h"
+#include "signal.h"
+#include "mbox.h"
 
 #define CMD_MAX   256
 #define ARGV_MAX  8
@@ -91,6 +95,11 @@ static void cmd_help(void) {
     uart_puts("pfree <addr>             : free a page block\n");
     uart_puts("kmalloc <size>           : allocate from the dynamic allocator\n");
     uart_puts("kfree <addr>             : free a dynamic allocation\n");
+    uart_puts("ps                       : list threads\n");
+    uart_puts("kthread [n]              : create n kernel threads that yield\n");
+    uart_puts("exec <file>              : run a user program from the initramfs\n");
+    uart_puts("kill <pid>               : send SIGKILL to a thread\n");
+    uart_puts("mbox                     : board info through the VideoCore mailbox\n");
     uart_puts("reboot                   : reset the board\n");
 }
 
@@ -429,6 +438,123 @@ static void cmd_memtest(void) {
     uart_puts(" frames\n");
 }
 
+/* --- lab 5 --------------------------------------------------------------- */
+
+static void demo_kthread(void) {
+    struct thread *t = current();
+
+    for (int i = 0; i < 5; i++) {
+        /* A line is several calls, and each one only holds off preemption for
+         * its own duration, so the whole line needs holding together. */
+        preempt_disable();
+        uart_puts("  thread ");
+        uart_dec(t->pid);
+        uart_puts(" iteration ");
+        uart_dec(i);
+        uart_puts("\n");
+        preempt_enable();
+
+        for (volatile int d = 0; d < 200000; d++) { }
+        schedule();             /* yield, so the interleaving is visible */
+    }
+}
+
+static void cmd_kthread(int argc, char **argv) {
+    uint64_t n = 3;
+
+    if (argc >= 2 && !parse_uint(argv[1], &n)) {
+        uart_puts("usage: kthread [count]\n");
+        return;
+    }
+    if (n == 0 || n > 8) n = 3;
+
+    uart_puts("creating ");
+    uart_dec(n);
+    uart_puts(" kernel threads; their output interleaves as they yield\n");
+
+    for (uint64_t i = 0; i < n; i++) {
+        if (thread_create(demo_kthread) == 0) {
+            uart_puts("thread_create failed\n");
+            return;
+        }
+    }
+}
+
+/* exec runs in a thread of its own rather than replacing the shell, so the
+ * shell stays usable while the user program runs -- which is the point of the
+ * timer preemption. */
+static char exec_name[64];
+
+static void exec_thread(void) {
+    struct thread *t = current();
+
+    if (do_exec(t->tf, exec_name) != 0) {
+        uart_puts("exec: cannot load \"");
+        uart_puts(exec_name);
+        uart_puts("\" from the initramfs\n");
+        thread_exit(-1);
+    }
+
+    enter_user_mode(t->tf);     /* does not return */
+}
+
+static void cmd_exec(int argc, char **argv) {
+    if (argc < 2) {
+        uart_puts("usage: exec <file>   (a flat binary in the initramfs)\n");
+        return;
+    }
+
+    int i = 0;
+    while (argv[1][i] && i < (int)sizeof(exec_name) - 1) {
+        exec_name[i] = argv[1][i];
+        i++;
+    }
+    exec_name[i] = '\0';
+
+    if (thread_create(exec_thread) == 0) uart_puts("out of memory\n");
+}
+
+static void cmd_kill(int argc, char **argv) {
+    uint64_t pid;
+
+    if (argc < 2 || !parse_uint(argv[1], &pid)) {
+        uart_puts("usage: kill <pid>\n");
+        return;
+    }
+
+    if (thread_by_pid((int)pid) == 0) {
+        uart_puts("no such thread\n");
+        return;
+    }
+
+    signal_send((int)pid, SIGKILL);
+    uart_puts("SIGKILL sent to pid ");
+    uart_dec(pid);
+    uart_puts("\n");
+}
+
+static void cmd_mbox(void) {
+    uint32_t revision, base, size;
+
+    if (mbox_board_revision(&revision) == 0) {
+        uart_puts("board revision: ");
+        uart_hex(revision);
+        uart_puts("\n");
+    } else {
+        uart_puts("board revision: mailbox call failed\n");
+    }
+
+    if (mbox_arm_memory(&base, &size) == 0) {
+        uart_puts("arm memory    : base ");
+        uart_hex(base);
+        uart_puts("  size ");
+        uart_hex(size);
+        uart_puts("\n");
+    } else {
+        uart_puts("arm memory    : mailbox call failed\n");
+    }
+}
+
 static void cmd_reboot(void) {
     uart_puts("rebooting...\n");
     uart_flush();
@@ -459,6 +585,11 @@ void shell(void) {
         else if (strcmp(argv[0], "exc")    == 0) cmd_exc();
         else if (strcmp(argv[0], "irqinfo") == 0) cmd_irqinfo();
         else if (strcmp(argv[0], "tasktest") == 0) cmd_tasktest();
+        else if (strcmp(argv[0], "ps")      == 0) thread_list();
+        else if (strcmp(argv[0], "kthread") == 0) cmd_kthread(argc, argv);
+        else if (strcmp(argv[0], "exec")    == 0) cmd_exec(argc, argv);
+        else if (strcmp(argv[0], "kill")    == 0) cmd_kill(argc, argv);
+        else if (strcmp(argv[0], "mbox")    == 0) cmd_mbox();
         else if (strcmp(argv[0], "meminfo") == 0) cmd_meminfo();
         else if (strcmp(argv[0], "memtest") == 0) cmd_memtest();
         else if (strcmp(argv[0], "palloc")  == 0) cmd_palloc(argc, argv);

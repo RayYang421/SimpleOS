@@ -38,6 +38,13 @@ static uint32_t ier_shadow;
 
 static uint64_t stat_rx, stat_tx, stat_irq;
 
+static void (*preempt_hook)(int enable);
+
+void uart_set_preempt_hook(void (*hook)(int enable)) { preempt_hook = hook; }
+
+static inline void hold_preemption(void)    { if (preempt_hook) preempt_hook(0); }
+static inline void release_preemption(void) { if (preempt_hook) preempt_hook(1); }
+
 void uart_init(void) {
     /* --- GPIO: set pin14,15 to ALT5 (mini UART) --- */
     unsigned int r = mmio_read(GPFSEL1);
@@ -239,17 +246,21 @@ void uart_flush(void) {
 }
 
 void uart_puts(const char *s) {
+    hold_preemption();
     while (*s) {
         if (*s == '\n') uart_send('\r'); /* terminals need CRLF */
         uart_send(*s++);
     }
+    release_preemption();
 }
 
 void uart_write(const char *buf, size_t len) {
+    hold_preemption();
     for (size_t i = 0; i < len; i++) {
         if (buf[i] == '\n') uart_send('\r');
         uart_send(buf[i]);
     }
+    release_preemption();
 }
 
 void uart_hex(uint64_t v) {
