@@ -178,9 +178,15 @@ def main():
             ("ps", 0.6),
             ("kthread 3", 4.0),
             ("ps", 0.6),
-            ("exec hello.img", 8.0),
+            # Bracketing the user programs, to show every frame they used came
+            # back when they exited.
+            ("meminfo", 1.5),
+            ("exec hello.img", 0.05),
+            ("vm", 8.0),
             ("exec sig.img", 4.0),
+            ("exec vm.img", 12.0),
             ("mbox", 0.8),
+            ("meminfo", 1.5),
         ]
 
         print("\nDriving the shell:")
@@ -371,6 +377,83 @@ def main():
         # --- lab 5: mailbox ---
         check(re.search(r"board revision: 0x\w+", out) is not None,
               "mbox_call reached the VideoCore mailbox", out)
+
+        # --- lab 6: the kernel's own address space ---
+        print("\n  -- kernel virtual memory --")
+        check("mmu on, kernel at 0xffff" in out,
+              "the kernel runs translated, from the upper half", out)
+        check("boot page tables" in out,
+              "startup reserved the tables the kernel booted through", out)
+        # Peripherals are reached through the kernel mapping now, so a working
+        # mailbox and timer prove device memory is still device memory.
+        check("arm memory    : base" in out,
+              "MMIO still works through the linear mapping", out)
+
+        # --- lab 6: one address space per process ---
+        print("\n  -- user address spaces --")
+        spaces = re.findall(r"pid (\d+)  pgd: 0x(\w+)", out)
+        check(len(spaces) >= 2,
+              f"two processes were alive at once {[p for p, _ in spaces]}", out)
+        check(len({g for _, g in spaces}) == len(spaces),
+              f"each has a page table of its own {[g for _, g in spaces]}", out)
+        check(out.count("0x0000000000000000  0x0000000000001000  rwx") >= 2,
+              "both are loaded at address 0, in their own address space", out)
+        check(out.count("0x0000ffffffffb000  0x0000fffffffff000  rw-") >= 2,
+              "both have a stack at the top of the user half", out)
+
+        # --- lab 6: demand paging ---
+        print("\n  -- demand paging --")
+        check(re.search(r"0x0000ffffffffb000  0x0000fffffffff000  rw-   1/4 page", out)
+              is not None,
+              "only the stack page actually touched has a frame behind it", out)
+        faults = re.findall(r"\[Translation fault\]: 0x(\w+)", out)
+        check("0000000000000000" in faults,
+              "the program was faulted in by its own first instruction fetch", out)
+        check(len(faults) >= 6, f"pages arrived as they were used ({len(faults)} faults)", out)
+
+        # A syscall dereferences the user pointer it was handed, so the kernel
+        # itself can be the one to take the fault -- and has to resume from it.
+        untouched = re.search(r"handing the kernel an untouched page at 0x(\w+)", out)
+        check(untouched is not None, "the demo handed over an unmapped page", out)
+        if untouched:
+            between = out.split(untouched.group(0), 1)[1].split(
+                "user: kernel resumed", 1)[0]
+            check(f"[Translation fault]: 0x{untouched.group(1)}" in between,
+                  "the kernel faulted on the user pointer it was given", out)
+        check("user: kernel resumed the fault it took reading that page" in out,
+              "and carried on from where it faulted", out)
+
+        # --- lab 6: mmap ---
+        print("\n  -- mmap --")
+        check("user: mmap anonymous -> 0x0000000010000000" in out,
+              "mmap picked an address when given none", out)
+        check("user: wrote 42, read back 42" in out,
+              "a region mapped without MAP_POPULATE arrived on first write", out)
+        check("user: populated region holds 7" in out,
+              "MAP_POPULATE mapped the whole region up front", out)
+        check("user: mmap at a chosen address -> 0x0000000020000000" in out,
+              "a page-aligned address nothing else uses is honoured", out)
+
+        # --- lab 6: copy on write ---
+        print("\n  -- copy on write --")
+        check("user: child wrote 200, child sees 200" in out and
+              "user: parent still sees 100" in out,
+              "the child's write split a page the fork had shared", out)
+        revisions = re.findall(r"user: (parent|child) read board revision 0x(\w+)", out)
+        check(len(revisions) == 2 and revisions[0][1] == revisions[1][1],
+              f"mbox_call works from both sides of a fork {revisions}", out)
+
+        # --- lab 6: access violations ---
+        print("\n  -- segmentation faults --")
+        check("[Segmentation fault]: Kill Process" in out,
+              "writing to a read-only region is fatal", out)
+        check("user: THIS SHOULD NOT PRINT" not in out,
+              "the process really stopped at the faulting instruction", out)
+
+        # --- lab 6: reclaiming an address space ---
+        free_counts = [int(n) for n in re.findall(r"frames: \d+ total, (\d+) free", out)]
+        check(len(free_counts) >= 3 and free_counts[-1] == free_counts[-2],
+              f"every frame the user programs used came back {free_counts[-2:]}", out)
 
         print("\n--- full transcript " + "-" * 45)
         print(out)

@@ -1,4 +1,5 @@
 #include "mm.h"
+#include "mmu.h"
 #include "page.h"
 #include "fdt.h"
 #include "cpio.h"
@@ -48,17 +49,21 @@ void mem_init(void) {
      * system it describes can hand out anything. */
     page_init(base, size);
 
+    /* Physical throughout: these are frames, and the reservation is against the
+     * frame array, not against anything the kernel dereferences. */
+    uint64_t kernel_start = PA(_start);
+    uint64_t kernel_end   = PA(__end);
+
     memory_reserve(0, SPIN_TABLE_TOP, "spin tables");
-    memory_reserve((uint64_t)(uintptr_t)_start - KERNEL_STACK_SIZE,
-                   (uint64_t)(uintptr_t)_start, "kernel stack");
-    memory_reserve((uint64_t)(uintptr_t)_start, (uint64_t)(uintptr_t)__end,
-                   "kernel image");
+    memory_reserve(SPIN_TABLE_TOP, BOOT_TABLES_END, "boot page tables");
+    memory_reserve(kernel_start - KERNEL_STACK_SIZE, kernel_start, "kernel stack");
+    memory_reserve(kernel_start, kernel_end, "kernel image");
 
     /* Inside the kernel image span above, but reserved by name so the
      * dependency is explicit rather than incidental. */
     uint64_t heap_start, heap_end;
     startup_alloc_range(&heap_start, &heap_end);
-    memory_reserve(heap_start, heap_end, "startup allocator + frame array");
+    memory_reserve(PA(heap_start), PA(heap_end), "startup allocator + frame array");
 
     uint64_t dtb = fdt_get_base();
     if (dtb) memory_reserve(dtb, dtb + fdt_get_totalsize(), "devicetree blob");
@@ -68,7 +73,7 @@ void mem_init(void) {
         memory_reserve(initrd_start, initrd_end, "initramfs (from devicetree)");
     } else if (cpio_valid()) {
         /* No devicetree to ask, so measure the archive itself. */
-        initrd_start = (uint64_t)(uintptr_t)cpio_get_base();
+        initrd_start = PA(cpio_get_base());
         memory_reserve(initrd_start, initrd_start + cpio_size(),
                        "initramfs (measured)");
     }

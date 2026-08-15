@@ -7,6 +7,8 @@
 #include "exception.h"
 #include "mm.h"
 #include "sched.h"
+#include "vm.h"
+#include "mmu.h"
 
 /* The lab asks for the core timer frequency shifted right by five, which is a
  * slice of about 31 ms. */
@@ -23,7 +25,7 @@ static void preempt_tick(void *arg) {
     timer_add_ms(preempt_tick, 0, SCHED_TICK_MS);
 }
 
-void main(uint64_t dtb_addr) {
+void main(uint64_t dtb_phys) {
     uart_init();
 
     /* Before anything is printed: the mini UART's FIFO is eight bytes deep and
@@ -38,24 +40,32 @@ void main(uint64_t dtb_addr) {
 
     uart_puts("\n== my-os kernel ==\n");
 
-    fdt_init(dtb_addr);
+    fdt_init(dtb_phys);
 
     uart_puts("running at EL");
     uart_dec(current_el());
     uart_puts("   timer ");
     uart_dec(timer_freq() / 1000000);
-    uart_puts(" MHz\n");
+    uart_puts(" MHz   mmu on, kernel at ");
+    uart_hex((uint64_t)(uintptr_t)main);
+    uart_puts("\n");
 
     uart_puts("devicetree: ");
     if (fdt_get_base()) uart_hex(fdt_get_base());
     else                uart_puts("none");
 
     uart_puts("   initramfs: ");
-    uart_hex((uint64_t)(uintptr_t)cpio_get_base());
+    uart_hex(PA(cpio_get_base()));
     if (!cpio_valid()) uart_puts(" (empty)");
     uart_puts("\n");
 
     mem_init();
+
+    /* The identity mapping the kernel booted through is only needed until it
+     * is running at its linked address. Handing the lower half over to an
+     * empty table turns a stray access to a low address into a fault, and
+     * leaves ttbr0_el1 doing nothing but naming the current process. */
+    mmu_drop_identity_map();
 
     /* Everything from here runs as a thread. The boot context becomes thread 0
      * and then the idle thread, so the run queue is never empty. */

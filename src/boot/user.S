@@ -8,6 +8,8 @@
  * leave_el0 returns straight into C rather than through eret, so nothing else
  * puts those registers back. */
 
+#include "syscall.h"
+
 #define RESUME_SP    0
 #define RESUME_LR    8
 #define RESUME_DAIF  16
@@ -65,17 +67,23 @@ leave_el0:
 
 /* save_all/load_all preserve every register across a trap, so the counter
  * survives in x19 with no effort here. The call number goes in x8, the same
- * convention the real syscalls use. */
+ * convention the real syscalls use.
+ *
+ * This runs at EL0, so it belongs in the page user address spaces map rather
+ * than with the rest of the kernel's text. It uses nothing but immediates,
+ * which is what lets it run at whatever address it gets mapped to. */
+.section ".usertext", "ax"
+
 .global user_program
 user_program:
     mov     x19, #5
 1:
-    mov     x8, #100                /* SYS_DEMO_REPORT */
+    mov     x8, #SYS_DEMO_REPORT
     svc     #0
     sub     x19, x19, #1
     cbnz    x19, 1b
 
-    mov     x8, #101                /* SYS_DEMO_LEAVE */
+    mov     x8, #SYS_DEMO_LEAVE
     svc     #0
 2:
     b       2b

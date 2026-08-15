@@ -1,9 +1,13 @@
 #include "uart.h"
 
-/* Where the kernel is written and jumped to. This is the address the kernel is
- * linked for, so it must not change without changing the kernel's linker
- * script too. The bootloader itself runs at 0x60000 (see linker.ld), so the
- * two never overlap and the receive loop cannot overwrite its own code. */
+/* Where the kernel is written and jumped to. The kernel is linked for an upper
+ * half address, but this is the physical address that one maps back to -- it
+ * builds its own page tables and moves there itself, so what arrives here is
+ * still an image that starts running at 0x80000. Changing this means changing
+ * KERNEL_PHYS_BASE in include/mmu.h and the kernel's linker script.
+ *
+ * The bootloader itself runs at 0x60000 (see linker.ld), so the two never
+ * overlap and the receive loop cannot overwrite its own code. */
 #define KERNEL_ADDR      0x80000UL
 
 /* A kernel larger than this means the size field is garbage. */

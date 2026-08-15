@@ -1,5 +1,6 @@
 #include "sched.h"
 #include "mm.h"
+#include "vm.h"
 #include "uart.h"
 #include "irq.h"
 #include "string.h"
@@ -148,6 +149,11 @@ void schedule(void) {
     }
 
     next->state = THREAD_RUNNING;
+
+    /* The register state and the address space belong to the same thread, so
+     * they change together. A kernel thread has none of its own and gets an
+     * empty table, which turns a stray low address into a fault. */
+    vm_switch(next->pgd);
     switch_to(prev, next);
 
     /* Reached only when something schedules this thread again; daif is on this
@@ -192,10 +198,8 @@ void kill_zombies(void) {
             /* Freed outside the critical section: kfree can return a frame to
              * the buddy system, which is more work than belongs with
              * interrupts off. */
-            if (t->kstack)    kfree(t->kstack);
-            if (t->ustack)    kfree(t->ustack);
-            if (t->prog)      kfree(t->prog);
-            if (t->sig_stack) kfree(t->sig_stack);
+            vm_destroy(t);
+            if (t->kstack) kfree(t->kstack);
             kfree(t);
 
             daif = irq_disable_save();
@@ -235,6 +239,10 @@ struct thread *thread_by_pid(int pid) {
 
     irq_restore(daif);
     return found;
+}
+
+struct thread *thread_iter(struct thread *prev) {
+    return prev ? prev->all_next : all_threads;
 }
 
 void thread_list(void) {

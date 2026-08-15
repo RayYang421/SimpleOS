@@ -109,8 +109,6 @@ el1t_irq:       invalid_entry 1
 el1t_fiq:       invalid_entry 2
 el1t_error:     invalid_entry 3
 
-/* A synchronous fault inside the kernel is a bug, not something to resume. */
-el1h_sync:      invalid_entry 4
 el1h_fiq:       invalid_entry 6
 el1h_error:     invalid_entry 7
 
@@ -138,6 +136,17 @@ el0_irq:
 el1h_irq:
     save_all
     bl      irq_entry
+    load_all
+    eret
+
+/* A fault inside the kernel is usually a bug, with one exception: a syscall
+ * that takes a user pointer dereferences it directly, and the page behind it
+ * may not have been faulted in yet. Those are resumable, so this entry returns
+ * rather than parking the core. */
+el1h_sync:
+    save_all
+    mov     x0, sp
+    bl      sync_handler_el1
     load_all
     eret
 

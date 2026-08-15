@@ -1,3 +1,5 @@
+#include "syscall.h"
+
 /* Context switch. Only the callee-saved registers need preserving: a switch
  * happens inside a function call, so everything else is either caller-saved or
  * already spilled by the compiler.
@@ -47,12 +49,14 @@ enter_user_mode:
     mov     sp, x0
     b       ret_to_user
 
-/* A handler returns here, because signal_check sets lr to this address. It
- * runs at EL0, and with no MMU the kernel's own text is executable there, so
- * no separate user-visible page is needed. */
+/* A handler returns here, because signal_check sets lr to this address. It runs
+ * at EL0, so it lives in the page every user address space maps -- the rest of
+ * the kernel's text is not reachable from there. */
+.section ".usertext", "ax"
+
 .global sigreturn_trampoline
 sigreturn_trampoline:
-    mov     x8, #10                 /* SYS_SIGRETURN */
+    mov     x8, #SYS_SIGRETURN
     svc     #0
 1:
     b       1b                      /* sigreturn does not come back */

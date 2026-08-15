@@ -1,5 +1,6 @@
 #include "mbox.h"
 #include "mmio.h"
+#include "mmu.h"
 #include "irq.h"
 
 #define MBOX_BASE    (MMIO_BASE + 0x0000B880)
@@ -22,7 +23,9 @@
 static volatile uint32_t buffer[36] __attribute__((aligned(16)));
 
 int mbox_call(unsigned char channel, unsigned int *mbox) {
-    uint64_t addr = (uint64_t)(uintptr_t)mbox;
+    /* The VideoCore reads the buffer itself and has no idea the ARM side is
+     * translating addresses, so what goes in the mailbox is physical. */
+    uint64_t addr = PA(mbox);
 
     /* The mailbox takes a 32-bit address with the channel in the low bits, so
      * a buffer above 4 GiB or misaligned cannot be passed at all. */

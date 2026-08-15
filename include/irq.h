@@ -16,8 +16,8 @@
 #define IRQ_AUX_BIT         (1u << 29)
 
 /* --- QA7 per-core interrupt routing --- */
-#define CORE0_TIMER_IRQ_CTRL 0x40000040
-#define CORE0_IRQ_SOURCE     0x40000060
+#define CORE0_TIMER_IRQ_CTRL (IO_BASE + 0x40000040UL)
+#define CORE0_IRQ_SOURCE     (IO_BASE + 0x40000060UL)
 
 #define CORE_IRQ_TIMER_NS    (1u << 1)   /* non-secure physical timer */
 #define CORE_IRQ_GPU         (1u << 8)   /* peripheral IRQ routed to this core */

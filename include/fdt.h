@@ -14,10 +14,14 @@ typedef void (*fdt_callback)(const char *node, const char *prop,
 
 /* Records the devicetree the bootloader/firmware passed in x0 and, if it is a
  * valid blob, locates the initramfs through it. Safe to call with a bogus
- * address: it validates the header before dereferencing anything else. */
-void fdt_init(uint64_t dtb_addr);
+ * address: it validates the header before dereferencing anything else.
+ *
+ * The address is physical, which is all the firmware knows about; reads of the
+ * blob go through the kernel's linear mapping of it. */
+void fdt_init(uint64_t dtb_phys);
 
-/* Address the kernel was booted with, or 0 if no valid devicetree was found. */
+/* Physical address the kernel was booted with, or 0 if no valid devicetree was
+ * found. Physical because that is the form to reserve and to report. */
 uint64_t fdt_get_base(void);
 
 /* Walks the struct block, invoking cb for every property.

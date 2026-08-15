@@ -1,6 +1,7 @@
 #include "fdt.h"
 #include "uart.h"
 #include "string.h"
+#include "mmu.h"
 #include "cpio.h"
 
 /* Flattened devicetree, as specified in the Devicetree Specification ch. 5.
@@ -34,7 +35,11 @@ struct fdt_header {
  * 0x20000000. Only used when the devicetree does not tell us. */
 #define INITRAMFS_FALLBACK 0x8000000UL
 
-static uint64_t fdt_base;
+/* Where the firmware left the blob, and the kernel's own view of it. The two
+ * differ once the MMU is on: the address handed over in x0 is physical, but
+ * every read of the tree goes through the linear mapping. */
+static uint64_t fdt_phys;
+static uint64_t fdt_va;
 
 uint32_t fdt_be32(const void *p) {
     const uint8_t *b = (const uint8_t *)p;
@@ -73,7 +78,7 @@ static const struct fdt_header *fdt_check(uint64_t addr) {
 }
 
 int fdt_traverse(fdt_callback cb, void *arg) {
-    const struct fdt_header *h = fdt_check(fdt_base);
+    const struct fdt_header *h = fdt_check(fdt_va);
     if (h == 0 || cb == 0) return -1;
 
     const uint8_t *blob    = (const uint8_t *)h;
@@ -136,7 +141,7 @@ int fdt_traverse(fdt_callback cb, void *arg) {
     return 0;
 }
 
-uint64_t fdt_get_base(void) { return fdt_base; }
+uint64_t fdt_get_base(void) { return fdt_phys; }
 
 /* Picks the initramfs address out of /chosen. The property is written by
  * whoever loaded the ramdisk (QEMU's -initrd, or the Rpi firmware from the
@@ -153,7 +158,7 @@ static void initramfs_callback(const char *node, const char *prop,
 }
 
 uint64_t fdt_get_totalsize(void) {
-    const struct fdt_header *h = fdt_check(fdt_base);
+    const struct fdt_header *h = fdt_check(fdt_va);
     return h ? fdt_be32(&h->totalsize) : 0;
 }
 
@@ -227,12 +232,20 @@ int fdt_get_initrd(uint64_t *start, uint64_t *end) {
     return 0;
 }
 
-void fdt_init(uint64_t dtb_addr) {
-    fdt_base = fdt_check(dtb_addr) ? dtb_addr : 0;
+void fdt_init(uint64_t dtb_phys) {
+    uint64_t va = (uint64_t)(uintptr_t)VA(dtb_phys);
+
+    if (dtb_phys && fdt_check(va)) {
+        fdt_phys = dtb_phys;
+        fdt_va   = va;
+    }
 
     uint64_t initramfs = 0;
-    if (fdt_base) fdt_traverse(initramfs_callback, &initramfs);
+    if (fdt_va) fdt_traverse(initramfs_callback, &initramfs);
 
     if (initramfs == 0) initramfs = INITRAMFS_FALLBACK;
-    cpio_set_base((void *)initramfs);
+
+    /* The devicetree records the physical address; the parser walks the archive
+     * through the kernel mapping. */
+    cpio_set_base(VA(initramfs));
 }

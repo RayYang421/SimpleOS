@@ -2,6 +2,8 @@
 #include "uart.h"
 #include "irq.h"
 #include "syscall.h"
+#include "sched.h"
+#include "vm.h"
 
 /* Exception Syndrome Register exception classes we name explicitly. */
 #define EC_SVC_AARCH64       0x15
@@ -44,7 +46,26 @@ void sync_handler(struct trap_frame *frame) {
         return;
     }
 
+    /* Most of what is left is a page the process is entitled to but has never
+     * touched. Anything the address space cannot explain is fatal. */
+    if (vm_fault(esr, read_far()) == 0) return;
+
     invalid_handler(frame, 99);
+
+    struct thread *t = current();
+    if (t && t->pgd) thread_exit(-1);    /* a user process, so end it */
+    for (;;) { }
+}
+
+/* Faults taken with the kernel already running. A syscall that was handed a
+ * user pointer dereferences it directly, so it can meet a page that has not
+ * been faulted in yet, or one that a fork left shared -- both are the address
+ * space's business and resumable. Everything else is a kernel bug. */
+void sync_handler_el1(struct trap_frame *frame) {
+    if (vm_fault(read_esr(), read_far()) == 0) return;
+
+    invalid_handler(frame, 4);
+    for (;;) { }
 }
 
 /* No recovery path: this prints what it can, and vectors.S parks the core. */

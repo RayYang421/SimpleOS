@@ -23,9 +23,17 @@ void page_init(uint64_t mem_base, uint64_t mem_size);
 void memory_reserve(uint64_t start, uint64_t end, const char *label);
 void page_finalize(void);
 
-/* 2^order contiguous frames, or NULL. The address is page-aligned. */
+/* 2^order contiguous frames, or NULL. The address returned is the kernel's
+ * mapping of them, page-aligned, and can be used as-is. */
 void *page_alloc(int order);
 void page_free(void *addr);
+
+/* How many address spaces are using a frame. A fork shares pages rather than
+ * copying them, so the last user has to be the one that releases it. These take
+ * a physical address, because that is what a page table entry holds. */
+void page_ref_inc(uint64_t pa);
+void page_ref_dec(uint64_t pa);     /* frees the frame when the count hits 0 */
+int  page_ref_get(uint64_t pa);
 
 /* Splits and merges are printed when logging is on, which is how the buddy
  * system's behaviour is meant to be demonstrated. Off during startup, since

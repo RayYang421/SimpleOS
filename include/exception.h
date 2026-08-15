@@ -19,6 +19,7 @@ struct trap_frame {
 };
 
 void sync_handler(struct trap_frame *frame);
+void sync_handler_el1(struct trap_frame *frame);
 void invalid_handler(struct trap_frame *frame, uint64_t kind);
 
 /* Drops to EL0 at entry with the given stack, and returns here when the user

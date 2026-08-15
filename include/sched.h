@@ -5,10 +5,11 @@
 #include "exception.h"
 
 #define KSTACK_SIZE 0x4000      /* 16 KiB */
-#define USTACK_SIZE 0x4000
 
 #define MAX_SIGNALS 16
 #define SIGKILL     9
+
+struct vm_area;
 
 enum thread_state {
     THREAD_UNUSED = 0,
@@ -38,14 +39,12 @@ struct thread {
     void (*entry)(void);            /* kernel threads only */
 
     void *kstack;                   /* allocation base, not the top */
-    void *ustack;
-    uint64_t ustack_size;
 
-    /* The loaded user image. Shared with a forked child -- only the stack is
-     * duplicated, so a program that keeps state in its own data section would
-     * see it shared. */
-    void *prog;
-    uint64_t prog_size;
+    /* The user address space: the physical address of this thread's PGD, and
+     * the regions it is allowed to touch. Both stay null for a kernel thread,
+     * which has no business below the kernel half. */
+    uint64_t pgd;
+    struct vm_area *vma;
 
     /* Where the thread's user-mode register state lives while it is in the
      * kernel: the top of its own kernel stack. */
@@ -56,7 +55,6 @@ struct thread {
     uint32_t sig_pending;
     int in_signal;
     struct trap_frame sig_saved;
-    void *sig_stack;
 
     struct thread *next;            /* run queue */
     struct thread *all_next;        /* every live thread, for kill() */
@@ -81,6 +79,11 @@ void idle_thread(void);
 
 struct thread *thread_by_pid(int pid);
 void thread_list(void);
+
+/* Walks the live threads: 0 to start, the last one returned to continue. For
+ * reporting only -- hold off preemption if the list must not change under the
+ * walk. */
+struct thread *thread_iter(struct thread *prev);
 
 static inline struct thread *current(void) {
     uint64_t t;

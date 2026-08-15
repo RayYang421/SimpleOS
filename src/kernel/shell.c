@@ -14,6 +14,8 @@
 #include "syscall.h"
 #include "signal.h"
 #include "mbox.h"
+#include "vm.h"
+#include "mmu.h"
 
 #define CMD_MAX   256
 #define ARGV_MAX  8
@@ -23,9 +25,6 @@
 #define PM_RSTC     (MMIO_BASE + 0x0010001C)
 #define PM_WDOG     (MMIO_BASE + 0x00100024)
 #define PM_RSTC_FULL_RESET 0x20u
-
-/* Stack for the EL0 demo program. It never nests, so one page is ample. */
-static char user_stack[4096] __attribute__((aligned(16)));
 
 /* Echoes as it goes. Input past the end of the buffer is dropped rather than
  * overflowing it. */
@@ -100,6 +99,7 @@ static void cmd_help(void) {
     uart_puts("exec <file>              : run a user program from the initramfs\n");
     uart_puts("kill <pid>               : send SIGKILL to a thread\n");
     uart_puts("mbox                     : board info through the VideoCore mailbox\n");
+    uart_puts("vm [pid]                 : show a process's address space\n");
     uart_puts("reboot                   : reset the board\n");
 }
 
@@ -140,7 +140,7 @@ static void cmd_dtb(void) {
     }
 
     uart_puts("initramfs base : ");
-    uart_hex((uint64_t)(uintptr_t)cpio_get_base());
+    uart_hex(PA(cpio_get_base()));
     uart_puts(cpio_valid() ? "  (valid cpio archive)\n" : "  (no archive here)\n");
 }
 
@@ -196,9 +196,24 @@ static void cmd_malloc(int argc, char **argv) {
     uart_puts(" bytes used\n");
 }
 
+/* EL0 cannot execute the kernel's text once the MMU is on, so even this demo
+ * needs an address space: one holding the shared page the program lives in and
+ * a stack. The shell thread borrows it for the excursion and gives it back. */
 static void cmd_exc(void) {
+    struct thread *t = current();
+
+    if (vm_new_address_space(t, 0, 0) != 0) {
+        uart_puts("out of memory\n");
+        return;
+    }
+    vm_switch(t->pgd);
+
     uart_puts("dropping to EL0; the user program issues SVC five times\n");
-    enter_el0((void *)user_program, user_stack + sizeof(user_stack));
+    enter_el0((void *)vm_shared_va((void *)user_program), (void *)USER_STACK_TOP);
+
+    vm_destroy(t);
+    vm_switch(0);
+
     uart_puts("returned to the kernel, now at EL");
     uart_dec(current_el());
     uart_puts("\n");
@@ -533,6 +548,37 @@ static void cmd_kill(int argc, char **argv) {
     uart_puts("\n");
 }
 
+static void cmd_vm(int argc, char **argv) {
+    uint64_t pid;
+
+    if (argc >= 2) {
+        if (!parse_uint(argv[1], &pid)) {
+            uart_puts("usage: vm [pid]\n");
+            return;
+        }
+
+        struct thread *t = thread_by_pid((int)pid);
+        if (t == 0) uart_puts("no such thread\n");
+        else        vm_report(t);
+        return;
+    }
+
+    /* Every process at once, held against preemption so none of them can exit
+     * and free its regions half-way through the walk. */
+    preempt_disable();
+
+    int found = 0;
+    for (struct thread *t = thread_iter(0); t; t = thread_iter(t)) {
+        if (t->pgd == 0) continue;
+        vm_report(t);
+        found++;
+    }
+
+    preempt_enable();
+
+    if (found == 0) uart_puts("no process has an address space right now\n");
+}
+
 static void cmd_mbox(void) {
     uint32_t revision, base, size;
 
@@ -590,6 +636,7 @@ void shell(void) {
         else if (strcmp(argv[0], "exec")    == 0) cmd_exec(argc, argv);
         else if (strcmp(argv[0], "kill")    == 0) cmd_kill(argc, argv);
         else if (strcmp(argv[0], "mbox")    == 0) cmd_mbox();
+        else if (strcmp(argv[0], "vm")      == 0) cmd_vm(argc, argv);
         else if (strcmp(argv[0], "meminfo") == 0) cmd_meminfo();
         else if (strcmp(argv[0], "memtest") == 0) cmd_memtest();
         else if (strcmp(argv[0], "palloc")  == 0) cmd_palloc(argc, argv);

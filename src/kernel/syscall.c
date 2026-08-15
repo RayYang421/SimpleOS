@@ -1,11 +1,11 @@
 #include "syscall.h"
 #include "sched.h"
 #include "signal.h"
+#include "vm.h"
+#include "mmu.h"
 #include "mbox.h"
 #include "uart.h"
 #include "cpio.h"
-#include "mm.h"
-#include "page.h"
 #include "string.h"
 #include "irq.h"
 
@@ -25,6 +25,9 @@ static void report_exception(struct trap_frame *tf) {
     uart_puts("\n");
 }
 
+/* Every process is loaded at address 0 of an address space of its own, so a
+ * program no longer has to be built to run from wherever there happened to be
+ * room -- and two of them can be running at the same address at once. */
 int do_exec(struct trap_frame *tf, const char *name) {
     const char *data;
     size_t size;
@@ -33,81 +36,52 @@ int do_exec(struct trap_frame *tf, const char *name) {
 
     struct thread *t = current();
 
-    /* The image must land on a page boundary. A position-independent binary
-     * reaches its own data with adrp, which is *page* relative -- it rounds
-     * the PC down to 4 KiB and adds the link-time offset. Linked at 0 and
-     * loaded page-aligned that works out; loaded at any other offset, every
-     * data reference is wrong by the difference. kmalloc would hand back a
-     * chunk part-way into a page, so take whole frames instead. */
-    int order = 0;
-    while ((PAGE_SIZE << order) < size) order++;
+    preempt_disable();
 
-    void *image = page_alloc(order);
-    if (image == 0) return -1;
-    memcpy(image, data, size);
-
-    void *stack = kmalloc(USTACK_SIZE);
-    if (stack == 0) {
-        kfree(image);
+    if (vm_new_address_space(t, data, size) != 0) {
+        preempt_enable();
         return -1;
     }
 
-    preempt_disable();
-
-    if (t->prog)   kfree(t->prog);
-    if (t->ustack) kfree(t->ustack);
-
-    t->prog        = image;
-    t->prog_size   = size;
-    t->ustack      = stack;
-    t->ustack_size = USTACK_SIZE;
-
     /* Rewriting the frame the syscall will return through is what makes the
-     * return land in the new program rather than back in the caller. */
+     * return land in the new program rather than back in the caller. Nothing
+     * is mapped yet: the first instruction fetch faults, and the fault handler
+     * copies that page of the image in. */
     memset(tf, 0, sizeof(*tf));
-    tf->elr    = (uint64_t)(uintptr_t)image;
-    tf->sp_el0 = (uint64_t)(uintptr_t)stack + USTACK_SIZE;
+    tf->elr    = USER_TEXT_VA;
+    tf->sp_el0 = USER_STACK_TOP;
     tf->spsr   = USER_SPSR;
 
+    vm_switch(t->pgd);
     preempt_enable();
     return 0;
 }
 
-/* The child gets its own copy of the user stack and of the trap frame, so it
- * returns from the same syscall the parent is in -- just with a different
- * answer. The program image itself is shared. */
+/* The child gets a copy of the parent's address space -- the regions outright,
+ * the pages themselves only as far as marking both sides read-only, so a frame
+ * is copied when one of them writes to it and not before. */
 static int do_fork(struct trap_frame *tf) {
     struct thread *parent = current();
 
-    if (parent->ustack == 0) return -1;   /* nothing to duplicate */
+    if (parent->pgd == 0) return -1;      /* not a user process */
 
     struct thread *child = thread_alloc();
     if (child == 0) return -1;
 
-    child->ustack = kmalloc(parent->ustack_size);
-    if (child->ustack == 0) return -1;
+    preempt_disable();
 
-    child->ustack_size = parent->ustack_size;
-    memcpy(child->ustack, parent->ustack, parent->ustack_size);
+    if (vm_fork(child, parent) != 0) {
+        /* Half-built and never queued, so the idle thread is the only one that
+         * can clean it up. */
+        child->state = THREAD_ZOMBIE;
+        preempt_enable();
+        return -1;
+    }
 
-    /* Shared image: exec would replace it, and kill_zombies must not free it
-     * twice, so only the parent owns it. */
-    child->prog      = 0;
-    child->prog_size = 0;
-
+    /* Returning from the same syscall the parent is in, just with a different
+     * answer. Every address in the frame means the same thing in the child's
+     * address space as it does in the parent's, so nothing has to be rebased. */
     *child->tf = *tf;
-
-    /* Anything that pointed into the parent's stack has to be rebased onto the
-     * copy, at the same offset. */
-    uint64_t base = (uint64_t)(uintptr_t)parent->ustack;
-    uint64_t top  = base + parent->ustack_size;
-    uint64_t cbase = (uint64_t)(uintptr_t)child->ustack;
-
-    if (tf->sp_el0 >= base && tf->sp_el0 <= top)
-        child->tf->sp_el0 = cbase + (tf->sp_el0 - base);
-    if (tf->x[29] >= base && tf->x[29] <= top)
-        child->tf->x[29] = cbase + (tf->x[29] - base);
-
     child->tf->x[0] = 0;                  /* the child's fork() returns 0 */
 
     for (int i = 0; i < MAX_SIGNALS; i++)
@@ -118,6 +92,7 @@ static int do_fork(struct trap_frame *tf) {
     child->ctx.lr = (uint64_t)(uintptr_t)ret_to_user;
     sched_enqueue(child);
 
+    preempt_enable();
     return child->pid;                    /* the parent's fork() returns this */
 }
 
@@ -129,6 +104,31 @@ static size_t do_uart_read(char *buf, size_t size) {
 static size_t do_uart_write(const char *buf, size_t size) {
     uart_write(buf, size);
     return size;
+}
+
+/* The VideoCore is given a physical address and knows nothing about page
+ * tables, so the message is relayed through a buffer the kernel owns. That also
+ * settles what a mailbox buffer means under copy-on-write: it is read out of
+ * the caller's address space and written back into it, both through the
+ * caller's own mapping, so a forked child's buffer is its own. */
+static int do_mbox_call(unsigned char channel, unsigned int *user_mbox) {
+    static volatile uint32_t relay[36] __attribute__((aligned(16)));
+
+    if (user_mbox == 0) return 0;
+
+    uint64_t daif = irq_disable_save();
+
+    uint32_t size = user_mbox[0] / 4;
+    if (size == 0 || size > 36) { irq_restore(daif); return 0; }
+
+    for (uint32_t i = 0; i < size; i++) relay[i] = user_mbox[i];
+
+    int ok = mbox_call(channel, (unsigned int *)relay);
+
+    for (uint32_t i = 0; i < size; i++) user_mbox[i] = relay[i];
+
+    irq_restore(daif);
+    return ok;
 }
 
 void syscall_dispatch(struct trap_frame *tf) {
@@ -160,8 +160,8 @@ void syscall_dispatch(struct trap_frame *tf) {
         break;
 
     case SYS_MBOX_CALL:
-        tf->x[0] = (uint64_t)mbox_call((unsigned char)tf->x[0],
-                                       (unsigned int *)(uintptr_t)tf->x[1]);
+        tf->x[0] = (uint64_t)do_mbox_call((unsigned char)tf->x[0],
+                                          (unsigned int *)(uintptr_t)tf->x[1]);
         break;
 
     case SYS_KILL:
@@ -174,6 +174,11 @@ void syscall_dispatch(struct trap_frame *tf) {
 
     case SYS_SIGKILL:
         signal_send((int)tf->x[0], (int)tf->x[1]);
+        break;
+
+    case SYS_MMAP:
+        tf->x[0] = (uint64_t)(uintptr_t)vm_mmap(tf->x[0], tf->x[1],
+                                                (int)tf->x[2], (int)tf->x[3]);
         break;
 
     case SYS_SIGRETURN:

@@ -1,14 +1,11 @@
 #include "signal.h"
 #include "sched.h"
 #include "syscall.h"
-#include "mm.h"
+#include "vm.h"
 #include "uart.h"
 #include "irq.h"
-#include "string.h"
 
-#define SIG_STACK_SIZE 0x2000
-
-void sigreturn_trampoline(void);    /* switch.S */
+void sigreturn_trampoline(void);    /* switch.S, in the shared EL0 page */
 
 void signal_register(int sig, void (*handler)(void)) {
     if (sig <= 0 || sig >= MAX_SIGNALS) return;
@@ -61,21 +58,22 @@ void signal_check(struct trap_frame *tf) {
         return;
     }
 
-    if (t->sig_stack == 0) {
-        t->sig_stack = kmalloc(SIG_STACK_SIZE);
-        if (t->sig_stack == 0) return;
-    }
-
     /* Stash the interrupted context so sigreturn can put it back, then point
      * the frame at the handler. The handler returns to a trampoline that
-     * issues sigreturn, which is how control comes back here. */
+     * issues sigreturn, which is how control comes back here -- and it has to
+     * be reached at its user address, since the kernel's own text is not
+     * executable at EL0. */
     t->sig_saved = *tf;
     t->in_signal = 1;
 
     tf->elr    = (uint64_t)(uintptr_t)handler;
-    tf->sp_el0 = (uint64_t)(uintptr_t)t->sig_stack + SIG_STACK_SIZE;
-    tf->x[30]  = (uint64_t)(uintptr_t)sigreturn_trampoline;
+    tf->x[30]  = vm_shared_va((void *)sigreturn_trampoline);
     tf->x[0]   = (uint64_t)sig;
+
+    /* The handler runs on the interrupted stack, below whatever is on it.
+     * Nothing there needs preserving -- AArch64 has no red zone -- and
+     * sigreturn puts the stack pointer back with the rest of the frame. */
+    tf->sp_el0 &= ~15UL;
 }
 
 void signal_return(struct trap_frame *tf) {

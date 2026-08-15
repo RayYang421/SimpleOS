@@ -11,7 +11,11 @@ INCLUDE  = include
 # trapped at EL1 by default, and GCC will happily vectorise something like a
 # large struct memset into SIMD stores, which faults. Forbidding them also
 # means a context switch never has to save them.
-CFLAGS  = -Wall -O2 -ffreestanding -nostdinc -nostdlib -nostartfiles -mgeneral-regs-only -I$(INCLUDE)
+# MMU_ENABLED puts peripheral registers behind the kernel's linear mapping. The
+# bootloader compiles the same drivers without it, since it runs with
+# translation off.
+CFLAGS  = -Wall -O2 -ffreestanding -nostdinc -nostdlib -nostartfiles -mgeneral-regs-only \
+          -DMMU_ENABLED -I$(INCLUDE)
 # Bare-metal images have no separate loadable segments; the warning is noise.
 LDFLAGS = --no-warn-rwx-segments
 
