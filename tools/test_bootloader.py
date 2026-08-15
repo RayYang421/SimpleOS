@@ -20,6 +20,12 @@ MAGIC = b"OSCK"
 ACK = 0x06
 NAK = 0x15
 
+# Every wait below is wall-clock, but what it is really waiting for is the
+# guest making progress -- and under icount the guest runs as fast as the host
+# can emulate it. A slower machine (a CI runner, say) needs longer for the same
+# amount of guest time, so the waits scale rather than being retuned.
+WAIT_SCALE = float(os.environ.get("TEST_WAIT_SCALE", "1"))
+
 BOOTLOADER = "bootloader/build/bootloader.img"
 KERNEL = "build/kernel8.img"
 INITRAMFS = "initramfs.cpio"
@@ -60,6 +66,7 @@ class Board:
 
     def wait_for_status(self, timeout, what):
         """Scan the stream for the next ACK/NAK control byte."""
+        timeout *= WAIT_SCALE
         deadline = time.time() + timeout
         while True:
             while self.cursor < len(self.buf):
@@ -79,6 +86,7 @@ class Board:
 
     def wait_for_text(self, needle, timeout):
         """Wait until needle appears anywhere in the output received so far."""
+        timeout *= WAIT_SCALE
         deadline = time.time() + timeout
         target = needle.encode()
         while True:
@@ -97,8 +105,8 @@ class Board:
         # Terminals send CR for Enter; the kernel's uart_getc maps it to '\n'.
         self.send(text.encode() + b"\r")
 
-    def drain(self, seconds):
-        deadline = time.time() + seconds
+    def drain(self, seconds, scale=True):
+        deadline = time.time() + seconds * (WAIT_SCALE if scale else 1)
         while time.time() < deadline:
             self._pump(max(0.0, deadline - time.time()))
 
@@ -157,8 +165,14 @@ def main():
         if not board.wait_for_text("Welcome to my-os shell", 10):
             fail("shell did not start", board.transcript())
 
-        # (command, seconds to wait afterwards). The lab 3 commands need real
-        # time to pass, because that is what they are demonstrating.
+        # (command, seconds to wait afterwards, whether that wait scales).
+        # The lab 3 commands need real time to pass, because that is what they
+        # are demonstrating.
+        #
+        # A wait that is there to let something finish scales with the machine.
+        # One that aims at a moment *inside* a running program must not: a
+        # slower machine stretches the program too, so scaling the delay would
+        # walk it off the end instead of keeping it in the middle.
         script = [
             ("help", 0.6), ("hello", 0.6), ("ls", 0.6),
             ("cat hello.txt", 0.6), ("cat dir/nested.txt", 0.6),
@@ -181,18 +195,23 @@ def main():
             # Bracketing the user programs, to show every frame they used came
             # back when they exited.
             ("meminfo", 1.5),
-            ("exec hello.img", 0.05),
+            ("exec hello.img", 0.05, False),
+            ("vm", 0.10, False),
+            ("vm", 0.20, False),
             ("vm", 8.0),
-            ("exec sig.img", 4.0),
-            ("exec vm.img", 12.0),
+            ("exec sig.img", 0.05, False),
+            ("vm", 4.0),
+            ("exec vm.img", 0.30, False),
+            ("vm", 12.0),
             ("mbox", 0.8),
             ("meminfo", 1.5),
         ]
 
         print("\nDriving the shell:")
-        for command, wait in script:
+        for entry in script:
+            command, wait = entry[0], entry[1]
             board.send_line(command)
-            board.drain(wait)
+            board.drain(wait, scale=entry[2] if len(entry) > 2 else True)
 
         board.drain(1.0)
         out = board.transcript()
@@ -391,11 +410,18 @@ def main():
 
         # --- lab 6: one address space per process ---
         print("\n  -- user address spaces --")
-        spaces = re.findall(r"pid (\d+)  pgd: 0x(\w+)", out)
-        check(len(spaces) >= 2,
-              f"two processes were alive at once {[p for p, _ in spaces]}", out)
-        check(len({g for _, g in spaces}) == len(spaces),
-              f"each has a page table of its own {[g for _, g in spaces]}", out)
+        # Each `vm` lists every process alive at that moment. Comparing within
+        # one report and not across the run is the point: a page table freed by
+        # one process is a frame like any other, and the next process is
+        # entitled to get it back.
+        reports = [dict(re.findall(r"pid (\d+)  pgd: 0x(\w+)", chunk))
+                   for chunk in out.split("live address spaces:")[1:]]
+        reports = [r for r in reports if r]
+
+        check(any(len(r) >= 2 for r in reports),
+              f"a report caught two processes alive at once {reports}", out)
+        check(all(len(set(r.values())) == len(r) for r in reports),
+              f"processes running together have separate page tables {reports}", out)
         check(out.count("0x0000000000000000  0x0000000000001000  rwx") >= 2,
               "both are loaded at address 0, in their own address space", out)
         check(out.count("0x0000ffffffffb000  0x0000fffffffff000  rw-") >= 2,

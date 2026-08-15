@@ -15,7 +15,7 @@ INCLUDE  = include
 # bootloader compiles the same drivers without it, since it runs with
 # translation off.
 CFLAGS  = -Wall -O2 -ffreestanding -nostdinc -nostdlib -nostartfiles -mgeneral-regs-only \
-          -DMMU_ENABLED -I$(INCLUDE)
+          -DMMU_ENABLED -I$(INCLUDE) $(EXTRA_CFLAGS)
 # Bare-metal images have no separate loadable segments; the warning is noise.
 LDFLAGS = --no-warn-rwx-segments
 

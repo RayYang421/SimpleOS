@@ -1,0 +1,75 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    # The end-to-end test drives a real QEMU session for several minutes of
+    # emulated time; this is a ceiling, not a target.
+    timeout-minutes: 25
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install the cross toolchain and QEMU
+        run: |
+          sudo apt-get update
+          # qemu-system-arm is the package that carries qemu-system-aarch64.
+          sudo apt-get install -y --no-install-recommends \
+            gcc-aarch64-linux-gnu qemu-system-arm cpio
+
+      - name: Report the tool versions
+        run: |
+          aarch64-linux-gnu-gcc --version | head -1
+          qemu-system-aarch64 --version | head -1
+
+      # The kernel reads the initramfs address out of the devicetree, so the
+      # test needs a real blob. It is fetched from the Raspberry Pi firmware
+      # repository rather than committed, so cache it instead of depending on
+      # that being reachable on every run.
+      - name: Cache the devicetree blob
+        uses: actions/cache@v4
+        with:
+          path: bcm2710-rpi-3-b-plus.dtb
+          key: rpi3-dtb-v1
+
+      - name: Build the kernel, the bootloader and the user programs
+        run: make EXTRA_CFLAGS=-Werror all bootloader
+
+      - name: Check the kernel is linked where it is loaded
+        run: |
+          # start.S maps physical 0x80000 to this address and branches there,
+          # so a change to one without the other would boot into nothing.
+          aarch64-linux-gnu-nm build/kernel8.elf | grep -q '^ffff000000080000 T _start'
+          # The page mapped into user address spaces has to be a page of its
+          # own, or mapping it would expose whatever shares it.
+          aarch64-linux-gnu-nm build/kernel8.elf \
+            | grep -E '__user_page_(start|end)' \
+            | awk '{print $1}' | sort | uniq | wc -l | grep -q '^2$'
+
+      - name: End-to-end test
+        # A shared runner emulates more slowly than a workstation, and every
+        # wait in the harness is wall-clock; this buys the guest the time it
+        # needs to reach the same points.
+        env:
+          TEST_WAIT_SCALE: "3"
+        run: make test
+
+      # Everything generated belongs in build/ or is ignored; a build that
+      # edits a tracked file means the two have drifted apart.
+      - name: Rebuild from clean, and check the build dirties nothing tracked
+        run: |
+          before=$(git status --porcelain --untracked-files=no)
+          make clean
+          make EXTRA_CFLAGS=-Werror all bootloader
+          after=$(git status --porcelain --untracked-files=no)
+          if [ "$before" != "$after" ]; then
+            echo "the build modified tracked files:"
+            git status --porcelain --untracked-files=no
+            exit 1
+          fi

@@ -567,6 +567,8 @@ static void cmd_vm(int argc, char **argv) {
      * and free its regions half-way through the walk. */
     preempt_disable();
 
+    uart_puts("live address spaces:\n");
+
     int found = 0;
     for (struct thread *t = thread_iter(0); t; t = thread_iter(t)) {
         if (t->pgd == 0) continue;
