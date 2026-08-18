@@ -136,7 +136,7 @@ send: $(KERNEL)
 	python3 tools/send_kernel.py $(PORT) $(KERNEL)
 
 clean:
-	rm -rf $(BUILDDIR) $(INITRAMFS) $(USER_BIN)
+	rm -rf $(BUILDDIR) $(INITRAMFS) $(USER_BIN) sd-corrupt.img
 	$(MAKE) -C bootloader clean
 
 .PHONY: all bootloader sdcard run run-bootloader run-pty debug test send clean

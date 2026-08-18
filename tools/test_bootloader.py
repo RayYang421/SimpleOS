@@ -120,6 +120,51 @@ class Board:
         self.proc.wait(timeout=5)
 
 
+def run_on_corrupt_card(kernel_path, kind, commands, seconds):
+    """Boots the kernel directly against a deliberately broken card.
+
+    Directly rather than through the bootloader, because this is about what
+    the file system does with the card and the transfer has already been
+    tested; it keeps the extra boot down to a few seconds."""
+    image = "sd-corrupt.img"
+    subprocess.run([sys.executable, "tools/make_sdcard.py", "corrupt", image, kind],
+                   check=True, stdout=subprocess.DEVNULL)
+
+    proc = subprocess.Popen(
+        ["qemu-system-aarch64", "-M", "raspi3b",
+         "-accel", "tcg,thread=single", "-icount", "shift=auto,sleep=on",
+         "-kernel", kernel_path, "-initrd", INITRAMFS, "-dtb", DTB,
+         "-drive", f"if=sd,file={image},format=raw",
+         "-display", "none", "-serial", "null", "-serial", "stdio"],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL)
+
+    before = os.path.getsize(image), open(image, "rb").read()
+    buf = bytearray()
+    deadline = time.time() + seconds * WAIT_SCALE
+
+    try:
+        for command in commands:
+            proc.stdin.write(command.encode() + b"\r")
+            proc.stdin.flush()
+
+        while time.time() < deadline:
+            ready, _, _ = select.select([proc.stdout], [], [],
+                                        max(0.0, deadline - time.time()))
+            if not ready:
+                break
+            chunk = os.read(proc.stdout.fileno(), 65536)
+            if not chunk:
+                break
+            buf += chunk
+    finally:
+        proc.kill()
+        proc.wait(timeout=5)
+
+    after = os.path.getsize(image), open(image, "rb").read()
+    return buf.decode(errors="replace"), before == after
+
+
 def fail(message, transcript=None):
     print(f"\n[FAIL] {message}")
     if transcript is not None:
@@ -612,6 +657,32 @@ def main():
         check(consistent.returncode == 0,
               f"the file system the kernel left behind is consistent "
               f"{consistent.stdout.strip()}", consistent.stdout)
+
+        # --- lab 8: a card that cannot be trusted ---
+        #
+        # Every number in a FAT volume decides where a later read or write
+        # lands, so a broken one has to be refused rather than followed. Two
+        # extra boots, because each needs its own card.
+        print("\n  -- malformed volumes --")
+
+        out2, unchanged = run_on_corrupt_card(kernel_path, "num-fats", [], 6)
+        check("fat32: the number of allocation tables is implausible" in out2,
+              "a boot sector claiming no allocation tables is refused", out2)
+        check("could not mount the SD card" in out2,
+              "and the volume is not mounted", out2)
+        check("Welcome to my-os shell" in out2,
+              "while the kernel carries on booting", out2)
+        check(unchanged, "nothing was written to the card", out2)
+
+        out3, unchanged = run_on_corrupt_card(
+            kernel_path, "cyclic-chain",
+            ["fs ls /boot", "fs write /boot/NEW.TXT x", "sync"], 10)
+        check(out3.count("a cluster chain leads back into itself") >= 2,
+              "a directory whose chain loops is caught, on listing and on "
+              "creating", out3)
+        check("cannot open /boot/NEW.TXT" in out3,
+              "and the operation fails instead of hanging", out3)
+        check(unchanged, "nothing was written to the card", out3)
 
         print("\nAll checks passed.")
 

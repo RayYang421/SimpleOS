@@ -9,6 +9,8 @@ can verify what the kernel wrote:
     tools/make_sdcard.py ls sd.img        # list the root directory
     tools/make_sdcard.py cat sd.img NAME  # print one file
     tools/make_sdcard.py check sd.img     # verify the structures are consistent
+    tools/make_sdcard.py corrupt sd.img KIND   # build a deliberately broken one
+    tools/make_sdcard.py corrupt --list        # what KIND can be
 
 Needs sfdisk and mkfs.vfat, but no root: the partition table and the file
 system are written into a plain file, and the one file the kernel expects to
@@ -234,7 +236,99 @@ class Fat32:
         self.f.close()
 
 
-def build(path):
+# --- deliberately broken volumes ---------------------------------------------
+#
+# Each of these is something a kernel that trusts the card would follow off the
+# end of the volume, or into a loop it never leaves. They exist so that
+# refusing them can be demonstrated rather than asserted.
+
+CORRUPTIONS = {
+    "num-fats":
+        "the boot sector claims zero allocation tables, so nothing would "
+        "record a cluster as used",
+    "total-sectors":
+        "the volume is smaller than its own metadata, which underflows the "
+        "cluster count to about four billion",
+    "cluster-size":
+        "sectors per cluster is 3, which is not a power of two",
+    "root-cluster":
+        "the root directory starts past the end of the volume",
+    "first-cluster":
+        "a file's first cluster is far outside the volume, so its sector "
+        "number overflows into the metadata",
+    "cyclic-chain":
+        "the root directory is full and its cluster chain points at itself",
+}
+
+
+def corrupt(path, kind):
+    """Builds a good volume and then breaks it one specific way."""
+    build(path, quiet=True)
+
+    fs = Fat32(path, writable=True)
+    boot = fs.read_sector(fs.part_lba)
+
+    if kind == "num-fats":
+        boot[0x10] = 0
+        fs.write_sector(fs.part_lba, boot)
+
+    elif kind == "total-sectors":
+        # Fewer sectors than the reserved region and the tables occupy.
+        struct.pack_into("<I", boot, 0x20, 8)
+        fs.write_sector(fs.part_lba, boot)
+
+    elif kind == "cluster-size":
+        boot[0x0D] = 3
+        fs.write_sector(fs.part_lba, boot)
+
+    elif kind == "root-cluster":
+        struct.pack_into("<I", boot, 0x2C, 0x00FF0000)
+        fs.write_sector(fs.part_lba, boot)
+
+    elif kind == "first-cluster":
+        # Large enough that data_start + (cluster - 2) * spc leaves 32 bits.
+        for lba, off, raw in fs.dir_entries(fs.root_cluster):
+            if fs.display_name(raw) != READ_FILE:
+                continue
+            sector = fs.read_sector(lba)
+            struct.pack_into("<H", sector, off + 20, 0x0FFF)
+            struct.pack_into("<H", sector, off + 26, 0xFFF0)
+            fs.write_sector(lba, sector)
+            break
+
+    elif kind == "cyclic-chain":
+        # A cycle only bites where something walks a chain to its end, which is
+        # the search for a free directory entry. So the directory has to be
+        # full -- no entry free or deleted anywhere in it -- and the chain has
+        # to lead back to the start.
+        #
+        # Every entry is a long-name fragment, which a reader skips without
+        # counting and which is neither free nor deleted. So nothing stops the
+        # walk: no entry ends the directory, no name fills the entry cache, and
+        # the chain never reaches an end. A reader that does not count its own
+        # steps goes round for ever.
+        sector = bytearray()
+        for i in range(SECTOR // 32):
+            entry = bytearray(32)
+            entry[0] = 0x41 + i                 # a sequence number, not free
+            entry[11] = ATTR_LFN
+            sector += entry
+
+        fs.write_sector(fs.cluster_sector(fs.root_cluster), sector)
+        for i in range(1, fs.sectors_per_cluster):
+            fs.write_sector(fs.cluster_sector(fs.root_cluster) + i, sector)
+
+        fs.set_fat_entry(fs.root_cluster, fs.root_cluster)
+
+    else:
+        fs.close()
+        raise SystemExit(f"unknown corruption {kind!r}")
+
+    fs.close()
+    print(f"{path}: {kind} -- {CORRUPTIONS[kind]}")
+
+
+def build(path, quiet=False):
     if os.path.exists(path):
         os.remove(path)
 
@@ -254,7 +348,9 @@ def build(path):
     fs.add_file(READ_FILE, READ_TEXT)
     fs.close()
 
-    print(f"{path}: FAT32 partition at block {PART_LBA}, containing {READ_FILE}")
+    if not quiet:
+        print(f"{path}: FAT32 partition at block {PART_LBA}, "
+              f"containing {READ_FILE}")
 
 
 def main():
@@ -271,6 +367,13 @@ def main():
         for name, (cluster, size) in sorted(fs.listing().items()):
             print(f"{name:14} cluster {cluster:<6} {size} bytes")
         fs.close()
+
+    elif action == "corrupt":
+        if path == "--list":
+            for kind, why in CORRUPTIONS.items():
+                print(f"{kind:16} {why}")
+            return
+        corrupt(path, sys.argv[3])
 
     elif action == "check":
         fs = Fat32(path)

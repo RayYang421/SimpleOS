@@ -102,38 +102,120 @@ static void put32(uint8_t *p, uint32_t v) {
     p[3] = (uint8_t)(v >> 24);
 }
 
-/* --- geometry --------------------------------------------------------------- */
+/* --- geometry ---------------------------------------------------------------
+ *
+ * Everything below reads cluster numbers off the card, so none of them can be
+ * trusted: a number out of range, or one that overflows the arithmetic that
+ * turns it into a sector, would otherwise send a write somewhere it has no
+ * business being -- the allocation table, or the partition table. */
 
-static uint32_t cluster_sector(uint32_t cluster) {
-    return fat.data_start + (cluster - 2) * fat.sectors_per_cluster;
+static void fat_corrupt(const char *what) {
+    uart_puts("fat32: ");
+    uart_puts(what);
+    uart_puts("\n");
 }
 
+/* A cluster this volume actually has. The upper bound is the number of
+ * clusters in the data area, not the format's reserved range: everything from
+ * there to FAT_EOC is a number the card can hold but the volume cannot use. */
 static int cluster_valid(uint32_t cluster) {
-    return cluster >= 2 && cluster < FAT_EOC;
+    return cluster >= 2 && cluster < fat.clusters;
+}
+
+/* The first sector of a cluster, or 0 if that lands outside a 32-bit sector
+ * number. Worked out in 64 bits so the overflow is visible rather than being
+ * the thing that produces the answer; a real volume's data never starts at
+ * sector 0, so 0 is free to mean "no such sector". */
+static uint32_t cluster_sector(uint32_t cluster) {
+    uint64_t sector = (uint64_t)fat.data_start +
+                      (uint64_t)(cluster - 2) * fat.sectors_per_cluster;
+
+    if (sector > 0xFFFFFFFFUL) {
+        fat_corrupt("a cluster number puts its sector past the end of the card");
+        return 0;
+    }
+
+    return (uint32_t)sector;
+}
+
+/* The block of the allocation table holding this cluster's entry, or 0 if the
+ * entry would fall outside the table. */
+static uint32_t fat_entry_block(uint32_t cluster, uint32_t copy,
+                                uint32_t *offset_in_block) {
+    uint64_t off = (uint64_t)cluster * 4;
+    uint64_t block = off / SD_BLOCK_SIZE;
+
+    if (block >= fat.fat_sectors) return 0;
+
+    *offset_in_block = (uint32_t)(off % SD_BLOCK_SIZE);
+    return fat.fat_start + copy * fat.fat_sectors + (uint32_t)block;
 }
 
 static uint32_t fat_get(uint32_t cluster) {
-    uint32_t off = cluster * 4;
-    uint8_t *sector = bcache_get(fat.fat_start + off / SD_BLOCK_SIZE);
+    uint32_t off;
+    uint32_t lba = fat_entry_block(cluster, 0, &off);
 
+    /* Outside the table: the entry does not exist, and the safe answer is the
+     * one that ends a chain rather than continues it somewhere else. */
+    if (lba == 0) return FAT_EOC;
+
+    uint8_t *sector = bcache_get(lba);
     if (sector == 0) return FAT_EOC;
-    return le32(sector + off % SD_BLOCK_SIZE) & FAT_MASK;
+
+    return le32(sector + off) & FAT_MASK;
 }
 
 /* Written to every copy of the table: a host that checks the image compares
  * them, and one stale copy makes it call the filesystem corrupt. */
 static void fat_set(uint32_t cluster, uint32_t value) {
-    uint32_t off = cluster * 4;
-
     for (uint32_t copy = 0; copy < fat.num_fats; copy++) {
-        uint32_t lba = fat.fat_start + copy * fat.fat_sectors +
-                       off / SD_BLOCK_SIZE;
+        uint32_t off;
+        uint32_t lba = fat_entry_block(cluster, copy, &off);
+
+        if (lba == 0) {
+            fat_corrupt("refusing to write a table entry outside the table");
+            return;
+        }
+
         uint8_t *sector = bcache_get(lba);
         if (sector == 0) return;
 
-        put32(sector + off % SD_BLOCK_SIZE, value & FAT_MASK);
+        put32(sector + off, value & FAT_MASK);
         bcache_mark_dirty(lba);
     }
+}
+
+/* --- following a chain -------------------------------------------------------
+ *
+ * A chain that leads back into itself would be followed for ever. A second
+ * cursor stepping half as often lands on the first within one lap of any loop,
+ * which finds it in the length of the loop rather than the length of the
+ * volume -- and since a chain longer than the volume has clusters must repeat
+ * one, a loop is the only way a walk can fail to end. */
+struct chain {
+    uint32_t trailing;
+    int      half_step;
+};
+
+static void chain_start(struct chain *c, uint32_t first) {
+    c->trailing  = first;
+    c->half_step = 0;
+}
+
+/* Moves *cluster on by one. Returns -1 when the chain has been caught leading
+ * back into itself. */
+static int chain_advance(struct chain *c, uint32_t *cluster) {
+    *cluster = fat_get(*cluster);
+
+    if (c->half_step) c->trailing = fat_get(c->trailing);
+    c->half_step = !c->half_step;
+
+    if (cluster_valid(*cluster) && *cluster == c->trailing) {
+        fat_corrupt("a cluster chain leads back into itself");
+        return -1;
+    }
+
+    return 0;
 }
 
 static uint32_t alloc_cluster(void) {
@@ -249,10 +331,16 @@ static void scan_directory(struct vnode *dir) {
     d->scanned = 1;
 
     uint32_t cluster = d->first_cluster;
+    struct chain walk;
+
+    chain_start(&walk, cluster);
 
     while (cluster_valid(cluster)) {
+        uint32_t base = cluster_sector(cluster);
+        if (base == 0) return;
+
         for (uint32_t s = 0; s < fat.sectors_per_cluster; s++) {
-            uint32_t lba = cluster_sector(cluster) + s;
+            uint32_t lba = base + s;
             uint8_t *sector = bcache_get(lba);
             if (sector == 0) return;
 
@@ -279,7 +367,7 @@ static void scan_directory(struct vnode *dir) {
             }
         }
 
-        cluster = fat_get(cluster);
+        if (chain_advance(&walk, &cluster) != 0) return;
     }
 }
 
@@ -325,10 +413,16 @@ static int find_free_dirent(struct vnode *dir, uint32_t *out_lba,
     struct fat_node *d = node_of(dir);
     uint32_t cluster = d->first_cluster;
     uint32_t last = cluster;
+    struct chain walk;
+
+    chain_start(&walk, cluster);
 
     while (cluster_valid(cluster)) {
+        uint32_t base = cluster_sector(cluster);
+        if (base == 0) return -1;
+
         for (uint32_t s = 0; s < fat.sectors_per_cluster; s++) {
-            uint32_t lba = cluster_sector(cluster) + s;
+            uint32_t lba = base + s;
             uint8_t *sector = bcache_get(lba);
             if (sector == 0) return -1;
 
@@ -341,8 +435,8 @@ static int find_free_dirent(struct vnode *dir, uint32_t *out_lba,
             }
         }
 
-        last    = cluster;
-        cluster = fat_get(cluster);
+        last = cluster;
+        if (chain_advance(&walk, &cluster) != 0) return -1;
     }
 
     /* Every entry is taken: give the directory another cluster and use its
@@ -350,10 +444,13 @@ static int find_free_dirent(struct vnode *dir, uint32_t *out_lba,
     uint32_t fresh = alloc_cluster();
     if (fresh == 0) return -1;
 
+    uint32_t base = cluster_sector(fresh);
+    if (base == 0) return -1;
+
     fat_set(last, fresh);
 
     for (uint32_t s = 0; s < fat.sectors_per_cluster; s++) {
-        uint32_t lba = cluster_sector(fresh) + s;
+        uint32_t lba = base + s;
         uint8_t *sector = bcache_get(lba);
         if (sector == 0) return -1;
 
@@ -361,7 +458,7 @@ static int find_free_dirent(struct vnode *dir, uint32_t *out_lba,
         bcache_mark_dirty(lba);
     }
 
-    *out_lba = cluster_sector(fresh);
+    *out_lba = base;
     *out_off = 0;
     return 0;
 }
@@ -423,8 +520,18 @@ static int fat_mkdir(struct vnode *dir, struct vnode **target,
 static uint32_t cluster_at(struct fat_node *n, uint32_t pos, int extend) {
     uint32_t cluster = n->first_cluster;
     uint32_t skip = pos / fat.cluster_bytes;
+    struct chain walk;
 
     if (!cluster_valid(cluster)) {
+        /* Zero is what a file with nothing in it looks like. Any other number
+         * that fails the check is one the volume cannot have, and allocating a
+         * replacement would quietly rewrite a corrupt entry as though it had
+         * always been empty. */
+        if (cluster != 0) {
+            fat_corrupt("a file starts at a cluster the volume does not have");
+            return 0;
+        }
+
         if (!extend) return 0;
 
         cluster = alloc_cluster();
@@ -434,10 +541,21 @@ static uint32_t cluster_at(struct fat_node *n, uint32_t pos, int extend) {
         update_dirent(n);
     }
 
+    chain_start(&walk, cluster);
+
     while (skip--) {
-        uint32_t next = fat_get(cluster);
+        uint32_t next = cluster;
+        if (chain_advance(&walk, &next) != 0) return 0;
 
         if (!cluster_valid(next)) {
+            /* Past the end of the range is the marker for the end of a chain,
+             * and extending from there is ordinary. Anything else is a number
+             * that has no business being in the table. */
+            if (next < FAT_EOC) {
+                fat_corrupt("a cluster chain leads outside the volume");
+                return 0;
+            }
+
             if (!extend) return 0;
 
             next = alloc_cluster();
@@ -468,8 +586,11 @@ static int fat_read(struct file *file, void *buf, size_t len) {
         uint32_t cluster = cluster_at(n, pos, 0);
         if (!cluster_valid(cluster)) break;
 
+        uint32_t base = cluster_sector(cluster);
+        if (base == 0) break;
+
         uint32_t in_cluster = pos % fat.cluster_bytes;
-        uint32_t lba = cluster_sector(cluster) + in_cluster / SD_BLOCK_SIZE;
+        uint32_t lba = base + in_cluster / SD_BLOCK_SIZE;
         uint32_t in_sector = in_cluster % SD_BLOCK_SIZE;
 
         uint8_t *sector = bcache_get(lba);
@@ -505,8 +626,11 @@ static int fat_write(struct file *file, const void *buf, size_t len) {
         uint32_t cluster = cluster_at(n, pos, 1);
         if (!cluster_valid(cluster)) break;
 
+        uint32_t base = cluster_sector(cluster);
+        if (base == 0) break;
+
         uint32_t in_cluster = pos % fat.cluster_bytes;
-        uint32_t lba = cluster_sector(cluster) + in_cluster / SD_BLOCK_SIZE;
+        uint32_t lba = base + in_cluster / SD_BLOCK_SIZE;
         uint32_t in_sector = in_cluster % SD_BLOCK_SIZE;
 
         uint8_t *sector = bcache_get(lba);
@@ -570,43 +694,101 @@ static int find_partition(uint32_t *lba) {
         return 0;
     }
 
+    fat_corrupt("no FAT32 partition in the table");
     return -1;
 }
 
+/* Every number below decides where a later read or write lands, so each one is
+ * checked here rather than trusted and used. A volume that fails any of them
+ * is refused outright: carrying on with a substituted value would mean writing
+ * to wherever the substitution happened to point. */
 static int read_boot_sector(uint32_t part_lba) {
     uint8_t *b = bcache_get(part_lba);
     if (b == 0) return -1;
 
-    if (b[510] != 0x55 || b[511] != 0xAA) return -1;
+    if (b[510] != 0x55 || b[511] != 0xAA) {
+        fat_corrupt("the boot sector has no signature");
+        return -1;
+    }
 
-    uint32_t bytes_per_sector = le16(b + 0x0B);
-    uint32_t reserved         = le16(b + 0x0E);
-    uint32_t fat_sectors      = le32(b + 0x24);
-    uint32_t total_sectors    = le32(b + 0x20);
+    uint32_t bytes_per_sector   = le16(b + 0x0B);
+    uint32_t sectors_per_cluster = b[0x0D];
+    uint32_t reserved           = le16(b + 0x0E);
+    uint32_t num_fats           = b[0x10];
+    uint32_t fat_sectors        = le32(b + 0x24);
+    uint32_t total_sectors      = le32(b + 0x20);
+    uint32_t root_cluster       = le32(b + 0x2C);
 
     /* The driver moves 512 bytes at a time, so anything else would need the
      * block layer to gather several. */
-    if (bytes_per_sector != SD_BLOCK_SIZE) return -1;
-    if (fat_sectors == 0 || reserved == 0) return -1;
+    if (bytes_per_sector != SD_BLOCK_SIZE) {
+        fat_corrupt("the sector size is not 512 bytes");
+        return -1;
+    }
+
+    /* A power of two from 1 to 128, which is what the format allows and what
+     * keeps a cluster from being larger than 64 KiB. */
+    if (sectors_per_cluster == 0 || sectors_per_cluster > 128 ||
+        (sectors_per_cluster & (sectors_per_cluster - 1)) != 0) {
+        fat_corrupt("the cluster size is not a power of two");
+        return -1;
+    }
+
+    /* With no copies of the table, every write recording an allocation would
+     * go nowhere and the chain would never be written down. */
+    if (num_fats == 0 || num_fats > 4) {
+        fat_corrupt("the number of allocation tables is implausible");
+        return -1;
+    }
+
+    if (reserved == 0 || fat_sectors == 0) {
+        fat_corrupt("the reserved or table region is empty");
+        return -1;
+    }
+
+    /* In 64 bits, because these come off the card and their sum in 32 would be
+     * free to wrap back into the range that looks reasonable. */
+    uint64_t metadata = (uint64_t)reserved + (uint64_t)num_fats * fat_sectors;
+
+    if (metadata >= total_sectors) {
+        fat_corrupt("the volume has no room for data after its metadata");
+        return -1;
+    }
+
+    uint64_t data_sectors = (uint64_t)total_sectors - metadata;
+    uint64_t clusters     = data_sectors / sectors_per_cluster + 2;
+
+    uint64_t data_start = (uint64_t)part_lba + metadata;
+    if (data_start > 0xFFFFFFFFUL || clusters > 0x0FFFFFF0UL) {
+        fat_corrupt("the volume describes more space than the card can hold");
+        return -1;
+    }
 
     fat.part_lba            = part_lba;
-    fat.sectors_per_cluster = b[0x0D];
-    fat.num_fats            = b[0x10];
+    fat.sectors_per_cluster = sectors_per_cluster;
+    fat.num_fats            = num_fats;
     fat.fat_sectors         = fat_sectors;
-    fat.root_cluster        = le32(b + 0x2C);
+    fat.root_cluster        = root_cluster;
     fat.fat_start           = part_lba + reserved;
-    fat.data_start          = fat.fat_start + fat.num_fats * fat_sectors;
-    fat.cluster_bytes       = fat.sectors_per_cluster * SD_BLOCK_SIZE;
+    fat.data_start          = (uint32_t)data_start;
+    fat.cluster_bytes       = sectors_per_cluster * SD_BLOCK_SIZE;
+    fat.clusters            = (uint32_t)clusters;
 
-    if (fat.sectors_per_cluster == 0 || fat.cluster_bytes == 0) return -1;
+    /* Checked last, because cluster_valid needs the fields above. */
+    if (!cluster_valid(fat.root_cluster)) {
+        fat_corrupt("the root directory is outside the volume");
+        return -1;
+    }
 
-    fat.clusters = (total_sectors - (fat.data_start - part_lba)) /
-                   fat.sectors_per_cluster + 2;
     return 0;
 }
 
 static int fat_setup_mount(struct filesystem *fs, struct mount *mount) {
     (void)fs;
+
+    /* Cleared first, so a mount that is refused cannot leave the previous
+     * volume's geometry behind for something else to use. */
+    fat.mounted = 0;
 
     if (!sd_present()) return -1;
 
