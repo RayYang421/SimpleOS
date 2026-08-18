@@ -89,7 +89,9 @@ static int fb_write(struct file *file, const void *buf, size_t len) {
     if (fb_base == 0) return -1;
     if (file->f_pos >= fb_size) return 0;
 
-    if (file->f_pos + len > fb_size) len = fb_size - file->f_pos;
+    /* By subtraction: adding a user-supplied len to f_pos can wrap. */
+    size_t room = fb_size - file->f_pos;
+    if (len > room) len = room;
 
     memcpy(fb_base + file->f_pos, buf, len);
     file->f_pos += len;

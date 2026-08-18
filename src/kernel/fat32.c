@@ -25,6 +25,12 @@
 #define FAT_MASK       0x0FFFFFFFu
 #define DIRENT_SIZE    32
 
+/* A directory entry records a length in 32 bits, so this is the format's own
+ * ceiling rather than a policy of ours -- and the read and write loops narrow
+ * the file position to the same width, which past here would wrap and start
+ * again over the beginning of the file. */
+#define FAT_MAX_FILE_SIZE 0xFFFFFFFFUL
+
 #define FAT_FILE 0
 #define FAT_DIR  1
 
@@ -452,7 +458,10 @@ static int fat_read(struct file *file, void *buf, size_t len) {
 
     if (n->type != FAT_FILE) return -1;
     if (file->f_pos >= n->size) return 0;
-    if (file->f_pos + len > n->size) len = n->size - file->f_pos;
+
+    /* By subtraction: adding a user-supplied len to f_pos can wrap. */
+    size_t room = n->size - file->f_pos;
+    if (len > room) len = room;
 
     while (done < len) {
         uint32_t pos     = (uint32_t)file->f_pos;
@@ -483,6 +492,13 @@ static int fat_write(struct file *file, const void *buf, size_t len) {
     size_t done = 0;
 
     if (!fat.mounted || n->type != FAT_FILE) return -1;
+    if (file->f_pos >= FAT_MAX_FILE_SIZE) return -1;
+
+    /* Bounded by subtraction, and bounded at all: without this the loop below
+     * would keep extending the cluster chain for as long as a user-supplied
+     * length asked it to. */
+    size_t room = FAT_MAX_FILE_SIZE - file->f_pos;
+    if (len > room) len = room;
 
     while (done < len) {
         uint32_t pos     = (uint32_t)file->f_pos;
@@ -524,8 +540,12 @@ static int fat_close(struct file *file) {
     return 0;
 }
 
+/* The same ceiling as fat_write, and for the same reason: a position past it
+ * cannot be recorded, and seeking there and writing one byte would ask for a
+ * cluster chain reaching all the way out to it. */
 static long fat_lseek64(struct file *file, long offset, int whence) {
     if (whence != SEEK_SET || offset < 0) return -1;
+    if ((uint64_t)offset > FAT_MAX_FILE_SIZE) return -1;
 
     file->f_pos = (size_t)offset;
     return offset;

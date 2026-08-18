@@ -174,7 +174,9 @@ static int irfs_read(struct file *file, void *buf, size_t len) {
     if (n->type != IRFS_FILE || n->data == 0) return -1;
     if (file->f_pos >= n->size) return 0;
 
-    if (file->f_pos + len > n->size) len = n->size - file->f_pos;
+    /* By subtraction: adding a user-supplied len to f_pos can wrap. */
+    size_t room = n->size - file->f_pos;
+    if (len > room) len = room;
 
     memcpy(buf, n->data + file->f_pos, len);
     file->f_pos += len;

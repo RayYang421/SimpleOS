@@ -131,7 +131,11 @@ static int tmpfs_write(struct file *file, const void *buf, size_t len) {
     }
 
     if (file->f_pos >= MAX_FILE_SIZE) return 0;
-    if (file->f_pos + len > MAX_FILE_SIZE) len = MAX_FILE_SIZE - file->f_pos;
+
+    /* By subtraction, never by adding to f_pos: len arrives from user space,
+     * and a large enough one makes the sum wrap and slip past the test. */
+    size_t room = MAX_FILE_SIZE - file->f_pos;
+    if (len > room) len = room;
 
     memcpy(n->data + file->f_pos, buf, len);
     file->f_pos += len;
@@ -149,7 +153,9 @@ static int tmpfs_read(struct file *file, void *buf, size_t len) {
     if (n->type != TMPFS_FILE) return -1;
     if (n->data == 0 || file->f_pos >= n->size) return 0;   /* at the end */
 
-    if (file->f_pos + len > n->size) len = n->size - file->f_pos;
+    /* By subtraction: adding a user-supplied len to f_pos can wrap. */
+    size_t room = n->size - file->f_pos;
+    if (len > room) len = room;
 
     memcpy(buf, n->data + file->f_pos, len);
     file->f_pos += len;
