@@ -24,13 +24,6 @@ C_SRC   = $(shell find $(SRCDIR) -name '*.c')
 OBJS    = $(patsubst $(SRCDIR)/%.S,$(BUILDDIR)/%_s.o,$(ASM_SRC)) \
           $(patsubst $(SRCDIR)/%.c,$(BUILDDIR)/%.o,$(C_SRC))
 
-# -MMD -MP above writes a .d file beside each object listing the headers it
-# used, and including them is what makes a header change rebuild what depends
-# on it. Without this a stale object survives a header edit, which shows up as
-# a working build behaving as though the edit never happened.
-DEPS    = $(OBJS:.o=.d)
--include $(DEPS)
-
 KERNEL     = $(BUILDDIR)/kernel8.img
 BOOTLOADER = bootloader/build/bootloader.img
 INITRAMFS  = initramfs.cpio
@@ -147,3 +140,13 @@ clean:
 	$(MAKE) -C bootloader clean
 
 .PHONY: all bootloader sdcard run run-bootloader run-pty debug test send clean
+
+# -MMD -MP above writes a .d file beside each object listing the headers it
+# used, and including them is what makes a header change rebuild what depends
+# on it. Without this a stale object survives a header edit, which shows up as
+# a working build behaving as though the edit never happened.
+#
+# It goes last: an included file's first rule would otherwise become the
+# default goal, and plain `make` would build one object instead of everything.
+DEPS = $(OBJS:.o=.d)
+-include $(DEPS)

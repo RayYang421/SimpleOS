@@ -21,10 +21,6 @@ LDFLAGS = --no-warn-rwx-segments
 
 OBJS = $(BUILDDIR)/start_s.o $(BUILDDIR)/main.o $(BUILDDIR)/uart.o
 
-# Header dependencies, so an edit to a shared header rebuilds what used it.
-DEPS = $(OBJS:.o=.d)
--include $(DEPS)
-
 all: $(BUILDDIR)/bootloader.img
 
 $(BUILDDIR)/start_s.o: $(SRCDIR)/start.S
@@ -49,3 +45,8 @@ clean:
 	rm -rf $(BUILDDIR)
 
 .PHONY: all clean
+
+# Header dependencies, so an edit to a shared header rebuilds what used it.
+# Last, so that an included rule does not become the default goal.
+DEPS = $(OBJS:.o=.d)
+-include $(DEPS)
