@@ -19,9 +19,10 @@ jobs:
       - name: Install the cross toolchain and QEMU
         run: |
           sudo apt-get update
-          # qemu-system-arm is the package that carries qemu-system-aarch64.
+          # qemu-system-arm is the package that carries qemu-system-aarch64;
+          # dosfstools provides mkfs.vfat, which builds the SD card image.
           sudo apt-get install -y --no-install-recommends \
-            gcc-aarch64-linux-gnu qemu-system-arm cpio
+            gcc-aarch64-linux-gnu qemu-system-arm cpio dosfstools
 
       - name: Report the tool versions
         run: |
@@ -38,7 +39,7 @@ jobs:
           path: bcm2710-rpi-3-b-plus.dtb
           key: rpi3-dtb-v1
 
-      - name: Build the kernel, the bootloader and the user programs
+      - name: Build the kernel, the bootloader, the user programs and the SD card
         run: make EXTRA_CFLAGS=-Werror all bootloader
 
       - name: Check the kernel is linked where it is loaded

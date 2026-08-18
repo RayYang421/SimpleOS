@@ -30,6 +30,7 @@ BOOTLOADER = "bootloader/build/bootloader.img"
 KERNEL = "build/kernel8.img"
 INITRAMFS = "initramfs.cpio"
 DTB = "bcm2710-rpi-3-b-plus.dtb"
+SD_IMAGE = "sd.img"
 
 
 class Board:
@@ -48,6 +49,7 @@ class Board:
              "-kernel", BOOTLOADER,
              "-initrd", INITRAMFS,
              "-dtb", DTB,
+             "-drive", f"if=sd,file={SD_IMAGE},format=raw",
              "-display", "none", "-serial", "null", "-serial", "stdio"],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL)
@@ -141,6 +143,13 @@ def main():
         if not os.path.exists(path):
             raise SystemExit(f"missing {path} -- run `make all bootloader` first")
 
+    # A fresh card every run: the kernel writes to it, so a second run would
+    # otherwise start with the first run's files already there and the check
+    # that an unsynced file never arrived would pass for the wrong reason.
+    print("Building a fresh SD card image...")
+    subprocess.run([sys.executable, "tools/make_sdcard.py", "build", SD_IMAGE],
+                   check=True, stdout=subprocess.DEVNULL)
+
     with open(kernel_path, "rb") as f:
         image = f.read()
     checksum = sum(image) & 0xFFFFFFFF
@@ -220,6 +229,10 @@ def main():
             ("fs ls ..", 0.6),
             ("fs cd /", 0.6),
             ("exec fs.img", 10.0),
+            ("sd", 0.8),
+            ("fs ls /boot", 0.8),
+            ("fs cat /boot/FAT_R.TXT", 0.8),
+            ("exec fat.img", 10.0),
         ]
 
         print("\nDriving the shell:")
@@ -544,9 +557,62 @@ def main():
               "seeking to a pixel and writing it worked", out)
         check("user: fs demo done" in out, "the demo ran to the end", out)
 
+        # --- lab 8: the SD card and FAT32 ---
+        print("\n  -- SD card and FAT32 --")
+        check("sd: card ready" in out, "the card initialised", out)
+        check(re.search(r"type 0x0*c\s+first block 2048", out) is not None,
+              "the partition table names a FAT32 partition at block 2048", out)
+        check("root cluster 2, 512 bytes per cluster" in out,
+              "the boot sector parsed", out)
+        check("FAT_R.TXT" in out, "the root directory of the card listed", out)
+        check("Hello from the SD card, read through FAT32." in out,
+              "a file on the card read through the VFS", out)
+
+        # --- lab 8: writing, and the cache ---
+        print("\n  -- write-back cache --")
+        check("user: read 44 bytes from /boot/FAT_R.TXT" in out,
+              "a user process read the card through the file descriptor calls", out)
+        check("user: wrote 19 bytes to /boot/FAT_WS.TXT" in out,
+              "a user process created a file on the card", out)
+        synced = re.search(r"user: sync wrote (\d+) block\(s\) to the card", out)
+        check(synced is not None and int(synced.group(1)) > 0,
+              f"sync pushed the dirty blocks out {synced.group(1) if synced else None}", out)
+        check("user: reading it back anyway: written but never synced" in out,
+              "an unsynced write is still visible to the process that made it", out)
+        check("user: fat demo done" in out, "the demo ran to the end", out)
+
         print("\n--- full transcript " + "-" * 45)
         print(out)
         print("-" * 65)
+        # The card outlives the run, so what actually landed on it can be read
+        # back here -- which is the only way to tell a real write from a
+        # convincing message about one.
+        print("\n  -- what reached the card --")
+        board.kill()
+
+        listing = subprocess.run(
+            [sys.executable, "tools/make_sdcard.py", "ls", SD_IMAGE],
+            capture_output=True, text=True).stdout
+        print(listing.rstrip())
+
+        check("FAT_WS.TXT" in listing,
+              "the synced file is on the card after the run", listing)
+        check("FAT_W.TXT" not in listing,
+              "the file written after the last sync never reached it", listing)
+
+        synced_text = subprocess.run(
+            [sys.executable, "tools/make_sdcard.py", "cat", SD_IMAGE, "FAT_WS.TXT"],
+            capture_output=True, text=True).stdout
+        check(synced_text == "written and synced\n",
+              f"and holds what was written to it ({synced_text!r})", listing)
+
+        consistent = subprocess.run(
+            [sys.executable, "tools/make_sdcard.py", "check", SD_IMAGE],
+            capture_output=True, text=True)
+        check(consistent.returncode == 0,
+              f"the file system the kernel left behind is consistent "
+              f"{consistent.stdout.strip()}", consistent.stdout)
+
         print("\nAll checks passed.")
 
     finally:

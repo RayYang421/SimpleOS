@@ -2,6 +2,7 @@
 #include "sched.h"
 #include "mm.h"
 #include "uart.h"
+#include "sd.h"
 #include "string.h"
 
 /* The filesystem registry and the mounts currently in the tree. Both are
@@ -377,12 +378,14 @@ void fd_table_open_stdio(void) {
 
 void tmpfs_register(void);          /* tmpfs.c */
 void initramfs_register(void);      /* initramfs_fs.c */
+void fat32_register(void);          /* fat32.c */
 void dev_uart_register(void);       /* dev_uart.c */
 void dev_fb_register(void);         /* dev_fb.c */
 
 void vfs_init(void) {
     tmpfs_register();
     initramfs_register();
+    fat32_register();
 
     struct filesystem *rootfs = find_filesystem("tmpfs");
     if (rootfs == 0) {
@@ -413,6 +416,13 @@ void vfs_init(void) {
 
     dev_uart_register();
     dev_fb_register();
+
+    /* The card is optional: QEMU without -drive if=sd has none, and the rest
+     * of the tree is still worth having. */
+    if (sd_present()) {
+        if (vfs_mkdir("/boot") != 0 || vfs_mount("/boot", "fat32") != 0)
+            uart_puts("vfs: could not mount the SD card on /boot\n");
+    }
 }
 
 /* --- reporting -------------------------------------------------------------- */

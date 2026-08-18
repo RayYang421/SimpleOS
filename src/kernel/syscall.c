@@ -3,6 +3,7 @@
 #include "signal.h"
 #include "vm.h"
 #include "vfs.h"
+#include "bcache.h"
 #include "mmu.h"
 #include "mbox.h"
 #include "uart.h"
@@ -244,6 +245,11 @@ void syscall_dispatch(struct trap_frame *tf) {
         tf->x[0] = (uint64_t)(int64_t)vfs_ioctl(fd_get((int)tf->x[0]),
                                                 (unsigned long)tf->x[1],
                                                 (void *)(uintptr_t)tf->x[2]);
+        break;
+
+    case SYS_SYNC:
+        /* Nothing written to a file has reached the card before this. */
+        tf->x[0] = (uint64_t)bcache_sync();
         break;
 
     case SYS_SIGRETURN:

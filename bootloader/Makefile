@@ -16,10 +16,14 @@ SHARED   = ../src
 # large struct memset into SIMD stores, which faults. Forbidding them also
 # means a context switch never has to save them.
 CFLAGS  = -Wall -O2 -ffreestanding -nostdinc -nostdlib -nostartfiles -mgeneral-regs-only \
-          -I$(INCLUDE) $(EXTRA_CFLAGS)
+          -I$(INCLUDE) -MMD -MP $(EXTRA_CFLAGS)
 LDFLAGS = --no-warn-rwx-segments
 
 OBJS = $(BUILDDIR)/start_s.o $(BUILDDIR)/main.o $(BUILDDIR)/uart.o
+
+# Header dependencies, so an edit to a shared header rebuilds what used it.
+DEPS = $(OBJS:.o=.d)
+-include $(DEPS)
 
 all: $(BUILDDIR)/bootloader.img
 

@@ -23,11 +23,12 @@
 #define SYS_CHDIR       17
 #define SYS_LSEEK64     18
 #define SYS_IOCTL       19
+#define SYS_SYNC        20
 
-/* The lab numbers everything up to ioctl; sigreturn is the kernel's own
+/* The lab numbers everything up to sync; sigreturn is the kernel's own
  * business, reached only from the trampoline a signal handler returns to, so
  * it takes the next free number. */
-#define SYS_SIGRETURN   20
+#define SYS_SIGRETURN   21
 
 /* Well clear of the lab's numbering, so the lab 3 exception demo keeps
  * working alongside the real calls. */

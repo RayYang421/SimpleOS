@@ -9,6 +9,7 @@
 #include "sched.h"
 #include "vm.h"
 #include "vfs.h"
+#include "sd.h"
 #include "mmu.h"
 
 /* The lab asks for the core timer frequency shifted right by five, which is a
@@ -67,6 +68,10 @@ void main(uint64_t dtb_phys) {
      * empty table turns a stray access to a low address into a fault, and
      * leaves ttbr0_el1 doing nothing but naming the current process. */
     mmu_drop_identity_map();
+
+    /* The card comes up before the file systems, so a FAT32 partition on it
+     * can be mounted as part of building the tree. */
+    if (sd_init() == 0) uart_puts("sd: card ready\n");
 
     /* Needs the allocators, so it comes after mem_init: tmpfs at the root, the
      * initramfs mounted under it, and the device files. */

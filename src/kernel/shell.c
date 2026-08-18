@@ -16,6 +16,10 @@
 #include "mbox.h"
 #include "vm.h"
 #include "vfs.h"
+#include "sd.h"
+#include "bcache.h"
+
+void fat32_report(void);   /* fat32.c */
 #include "mmu.h"
 
 #define CMD_MAX   256
@@ -102,6 +106,8 @@ static void cmd_help(void) {
     uart_puts("mbox                     : board info through the VideoCore mailbox\n");
     uart_puts("vm [pid]                 : show a process's address space\n");
     uart_puts("fs <cmd> [args]          : ls, cat, write, mkdir, mount, cd on the VFS\n");
+    uart_puts("sd                       : SD card, cache and FAT32 geometry\n");
+    uart_puts("sync                     : write cached blocks back to the card\n");
     uart_puts("reboot                   : reset the board\n");
 }
 
@@ -641,6 +647,75 @@ static void cmd_fs(int argc, char **argv) {
     }
 }
 
+/* Reads the master boot record and reports what the card is partitioned as. */
+static void cmd_sd(void) {
+    unsigned char block[SD_BLOCK_SIZE];
+
+    if (!sd_present()) {
+        uart_puts("no card (start QEMU with -drive if=sd,file=sd.img,format=raw)\n");
+        return;
+    }
+
+    uint64_t reads, writes;
+    sd_stats(&reads, &writes);
+    uart_puts("blocks read ");
+    uart_dec(reads);
+    uart_puts(", written ");
+    uart_dec(writes);
+    uart_puts("\n");
+
+    if (readblock(0, block) != 0) {
+        uart_puts("could not read the first block\n");
+        return;
+    }
+
+    if (block[510] != 0x55 || block[511] != 0xAA) {
+        uart_puts("no partition table signature\n");
+        return;
+    }
+
+    uint64_t hits, misses, cached, dirty;
+    bcache_stats(&hits, &misses, &cached, &dirty);
+    uart_puts("cache: ");
+    uart_dec(hits);
+    uart_puts(" hits, ");
+    uart_dec(misses);
+    uart_puts(" misses, ");
+    uart_dec(cached);
+    uart_puts(" page(s), ");
+    uart_dec(dirty);
+    uart_puts(" block(s) dirty\n");
+
+    fat32_report();
+
+    uart_puts("partitions:\n");
+    for (int i = 0; i < 4; i++) {
+        const unsigned char *e = block + 0x1BE + i * 16;
+        uint32_t start = (uint32_t)e[8] | ((uint32_t)e[9] << 8) |
+                         ((uint32_t)e[10] << 16) | ((uint32_t)e[11] << 24);
+        uint32_t count = (uint32_t)e[12] | ((uint32_t)e[13] << 8) |
+                         ((uint32_t)e[14] << 16) | ((uint32_t)e[15] << 24);
+
+        if (e[4] == 0) continue;                /* unused entry */
+
+        uart_puts("  type ");
+        uart_hex(e[4]);
+        uart_puts("  first block ");
+        uart_dec(start);
+        uart_puts("  blocks ");
+        uart_dec(count);
+        uart_puts("\n");
+    }
+}
+
+static void cmd_sync(void) {
+    int written = bcache_sync();
+
+    uart_puts("wrote ");
+    uart_dec(written);
+    uart_puts(" block(s) back to the card\n");
+}
+
 static void cmd_mbox(void) {
     uint32_t revision, base, size;
 
@@ -700,6 +775,8 @@ void shell(void) {
         else if (strcmp(argv[0], "mbox")    == 0) cmd_mbox();
         else if (strcmp(argv[0], "vm")      == 0) cmd_vm(argc, argv);
         else if (strcmp(argv[0], "fs")      == 0) cmd_fs(argc, argv);
+        else if (strcmp(argv[0], "sd")      == 0) cmd_sd();
+        else if (strcmp(argv[0], "sync")    == 0) cmd_sync();
         else if (strcmp(argv[0], "meminfo") == 0) cmd_meminfo();
         else if (strcmp(argv[0], "memtest") == 0) cmd_memtest();
         else if (strcmp(argv[0], "palloc")  == 0) cmd_palloc(argc, argv);
