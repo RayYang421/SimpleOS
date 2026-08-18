@@ -8,6 +8,7 @@
 #include "mm.h"
 #include "sched.h"
 #include "vm.h"
+#include "vfs.h"
 #include "mmu.h"
 
 /* The lab asks for the core timer frequency shifted right by five, which is a
@@ -66,6 +67,10 @@ void main(uint64_t dtb_phys) {
      * empty table turns a stray access to a low address into a fault, and
      * leaves ttbr0_el1 doing nothing but naming the current process. */
     mmu_drop_identity_map();
+
+    /* Needs the allocators, so it comes after mem_init: tmpfs at the root, the
+     * initramfs mounted under it, and the device files. */
+    vfs_init();
 
     /* Everything from here runs as a thread. The boot context becomes thread 0
      * and then the idle thread, so the run queue is never empty. */

@@ -1,6 +1,7 @@
 #include "sched.h"
 #include "mm.h"
 #include "vm.h"
+#include "vfs.h"
 #include "uart.h"
 #include "irq.h"
 #include "string.h"
@@ -198,6 +199,7 @@ void kill_zombies(void) {
             /* Freed outside the critical section: kfree can return a frame to
              * the buddy system, which is more work than belongs with
              * interrupts off. */
+            fd_table_close_all(t);
             vm_destroy(t);
             if (t->kstack) kfree(t->kstack);
             kfree(t);

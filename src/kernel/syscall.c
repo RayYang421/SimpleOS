@@ -2,6 +2,7 @@
 #include "sched.h"
 #include "signal.h"
 #include "vm.h"
+#include "vfs.h"
 #include "mmu.h"
 #include "mbox.h"
 #include "uart.h"
@@ -53,6 +54,11 @@ int do_exec(struct trap_frame *tf, const char *name) {
     tf->spsr   = USER_SPSR;
 
     vm_switch(t->pgd);
+
+    /* A fresh program expects a console on the usual three descriptors. The
+     * rest of the table survives, as it does across a POSIX exec. */
+    if (t->fds[0] == 0 && t->fds[1] == 0 && t->fds[2] == 0) fd_table_open_stdio();
+
     preempt_enable();
     return 0;
 }
@@ -86,6 +92,8 @@ static int do_fork(struct trap_frame *tf) {
 
     for (int i = 0; i < MAX_SIGNALS; i++)
         child->sig_handler[i] = parent->sig_handler[i];
+
+    fd_table_copy(child, parent);
 
     /* Scheduled straight back into user mode through its own frame. */
     child->ctx.sp = (uint64_t)(uintptr_t)child->tf;
@@ -179,6 +187,63 @@ void syscall_dispatch(struct trap_frame *tf) {
     case SYS_MMAP:
         tf->x[0] = (uint64_t)(uintptr_t)vm_mmap(tf->x[0], tf->x[1],
                                                 (int)tf->x[2], (int)tf->x[3]);
+        break;
+
+    /* --- lab 7: files --- */
+    case SYS_OPEN: {
+        struct file *f;
+        const char *path = (const char *)(uintptr_t)tf->x[0];
+
+        if (vfs_open(path, (int)tf->x[1], &f) != 0) { tf->x[0] = (uint64_t)-1; break; }
+
+        int fd = fd_install(f);
+        if (fd < 0) vfs_close(f);
+        tf->x[0] = (uint64_t)(int64_t)fd;
+        break;
+    }
+
+    case SYS_CLOSE:
+        tf->x[0] = (uint64_t)(int64_t)fd_close((int)tf->x[0]);
+        break;
+
+    case SYS_FWRITE:
+        tf->x[0] = (uint64_t)(int64_t)vfs_write(fd_get((int)tf->x[0]),
+                                                (const void *)(uintptr_t)tf->x[1],
+                                                (size_t)tf->x[2]);
+        break;
+
+    case SYS_FREAD:
+        tf->x[0] = (uint64_t)(int64_t)vfs_read(fd_get((int)tf->x[0]),
+                                               (void *)(uintptr_t)tf->x[1],
+                                               (size_t)tf->x[2]);
+        break;
+
+    case SYS_MKDIR:
+        /* The mode argument is accepted and ignored: there are no permissions
+         * to apply it to. */
+        tf->x[0] = (uint64_t)(int64_t)vfs_mkdir((const char *)(uintptr_t)tf->x[0]);
+        break;
+
+    case SYS_MOUNT:
+        /* mount(src, target, filesystem, flags, data); only the target and the
+         * filesystem name mean anything without a block device. */
+        tf->x[0] = (uint64_t)(int64_t)vfs_mount((const char *)(uintptr_t)tf->x[1],
+                                                (const char *)(uintptr_t)tf->x[2]);
+        break;
+
+    case SYS_CHDIR:
+        tf->x[0] = (uint64_t)(int64_t)vfs_chdir((const char *)(uintptr_t)tf->x[0]);
+        break;
+
+    case SYS_LSEEK64:
+        tf->x[0] = (uint64_t)vfs_lseek64(fd_get((int)tf->x[0]),
+                                         (long)tf->x[1], (int)tf->x[2]);
+        break;
+
+    case SYS_IOCTL:
+        tf->x[0] = (uint64_t)(int64_t)vfs_ioctl(fd_get((int)tf->x[0]),
+                                                (unsigned long)tf->x[1],
+                                                (void *)(uintptr_t)tf->x[2]);
         break;
 
     case SYS_SIGRETURN:

@@ -14,11 +14,20 @@
 #define SYS_SIGNAL      8
 #define SYS_SIGKILL     9
 #define SYS_MMAP        10
+#define SYS_OPEN        11
+#define SYS_CLOSE       12
+#define SYS_FWRITE      13
+#define SYS_FREAD       14
+#define SYS_MKDIR       15
+#define SYS_MOUNT       16
+#define SYS_CHDIR       17
+#define SYS_LSEEK64     18
+#define SYS_IOCTL       19
 
-/* The lab numbers everything up to mmap; sigreturn is the kernel's own
+/* The lab numbers everything up to ioctl; sigreturn is the kernel's own
  * business, reached only from the trampoline a signal handler returns to, so
  * it takes the next free number. */
-#define SYS_SIGRETURN   11
+#define SYS_SIGRETURN   20
 
 /* Well clear of the lab's numbering, so the lab 3 exception demo keeps
  * working alongside the real calls. */

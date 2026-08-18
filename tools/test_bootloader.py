@@ -205,6 +205,21 @@ def main():
             ("vm", 12.0),
             ("mbox", 0.8),
             ("meminfo", 1.5),
+            # After the frame-count check: the file system keeps what it is
+            # given, so files created here are not a leak but would look like
+            # one.
+            ("fs ls /", 0.6),
+            ("fs ls /initramfs", 0.6),
+            ("fs ls /initramfs/dir", 0.6),
+            ("fs cat /initramfs/dir/nested.txt", 0.6),
+            ("fs mkdir /tmp", 0.6),
+            ("fs write /tmp/note.txt vfs-round-trip", 0.6),
+            ("fs cat /tmp/note.txt", 0.6),
+            ("fs write /initramfs/x.txt nope", 0.6),
+            ("fs cd /initramfs", 0.6),
+            ("fs ls ..", 0.6),
+            ("fs cd /", 0.6),
+            ("exec fs.img", 10.0),
         ]
 
         print("\nDriving the shell:")
@@ -480,6 +495,54 @@ def main():
         free_counts = [int(n) for n in re.findall(r"frames: \d+ total, (\d+) free", out)]
         check(len(free_counts) >= 3 and free_counts[-1] == free_counts[-2],
               f"every frame the user programs used came back {free_counts[-2:]}", out)
+
+        # --- lab 7: the virtual file system ---
+        print("\n  -- virtual file system --")
+        check("initramfs/   (mount point)" in out,
+              "the initramfs is mounted inside the root filesystem", out)
+        check("A file in a subdirectory." in out,
+              "a file in a subdirectory of the initramfs reads through the VFS", out)
+        check("wrote 14 byte(s)" in out and "vfs-round-trip" in out,
+              "a file written to tmpfs reads back", out)
+        check("cannot open /initramfs/x.txt" in out,
+              "the initramfs refuses to have a file created in it", out)
+
+        # `fs ls ..` was run from /initramfs, which is a mount root: getting
+        # back to the root filesystem's listing means the walk crossed out of
+        # the mounted filesystem.
+        after_cd = out.split("# fs ls ..", 1)
+        check(len(after_cd) == 2 and "initramfs/   (mount point)" in after_cd[1][:200],
+              "\"..\" out of a mount root crosses back to the filesystem below", out)
+
+        # --- lab 7: file system syscalls ---
+        print("\n  -- file system syscalls --")
+        check("user: writing this through fd 1, which is /dev/uart" in out,
+              "the kernel opened /dev/uart on stdin, stdout and stderr", out)
+        check("user: open for writing gave fd 3" in out,
+              "the first file a process opens lands after the three it starts with", out)
+        check("user: read it back: hello from a user process" in out,
+              "a user process wrote a file and read it back", out)
+        check("user: the same file by relative path, fd 3" in out,
+              "chdir made a relative path resolve", out)
+        check("user: mount tmpfs on /home/mnt returned 0" in out and
+              "user: a file in the mounted filesystem, fd 3" in out,
+              "a process mounted a filesystem and used it", out)
+        check("user: after seeking to 6: from the initi" in out,
+              "lseek64 moved the read position", out)
+        check("user: creating a file in the initramfs returned -1" in out,
+              "a read-only filesystem says so to user space too", out)
+
+        # --- lab 7: the framebuffer ---
+        print("\n  -- framebuffer --")
+        fb = re.search(r"framebuffer: (\d+)x(\d+), pitch (\d+)", out)
+        check(fb is not None, "the mailbox allocated a framebuffer", out)
+        if fb:
+            check(f"user: framebuffer is {fb.group(1)} wide" in out and
+                  f"user: framebuffer pitch is {fb.group(3)} bytes" in out,
+                  "ioctl reported the same geometry to the process", out)
+        check("user: wrote 4 bytes of pixel to the framebuffer" in out,
+              "seeking to a pixel and writing it worked", out)
+        check("user: fs demo done" in out, "the demo ran to the end", out)
 
         print("\n--- full transcript " + "-" * 45)
         print(out)

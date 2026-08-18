@@ -58,9 +58,10 @@ static uint32_t align4(uint32_t x) { return (x + 3u) & ~3u; }
 
 /* Decodes the entry at ptr. On success fills the out params and returns a
  * pointer to the next entry; returns NULL at the trailer or on any malformed
- * field, which ends iteration. */
-static const char *cpio_next(const char *ptr, const char **name,
-                             const char **data, uint32_t *size) {
+ * field, which ends iteration. Exposed so a filesystem can be built out of the
+ * archive rather than re-parsing it on every read. */
+const char *cpio_next(const char *ptr, const char **name,
+                      const char **data, uint32_t *size, uint32_t *mode) {
     const struct cpio_newc_header *h = (const struct cpio_newc_header *)ptr;
 
     /* "070701" is newc, "070702" is newc with a checksum field; the layout is
@@ -68,9 +69,10 @@ static const char *cpio_next(const char *ptr, const char **name,
     if (strncmp(h->magic, "070701", 6) != 0 && strncmp(h->magic, "070702", 6) != 0)
         return 0;
 
-    uint32_t namesize, filesize;
+    uint32_t namesize, filesize, filemode;
     if (!parse_hex8(h->namesize, &namesize)) return 0;
     if (!parse_hex8(h->filesize, &filesize)) return 0;
+    if (!parse_hex8(h->mode, &filemode)) return 0;
     if (namesize == 0 || namesize > CPIO_MAX_NAMESIZE) return 0;
     if (filesize > CPIO_MAX_FILESIZE) return 0;
 
@@ -89,6 +91,7 @@ static const char *cpio_next(const char *ptr, const char **name,
     if (name) *name = entry_name;
     if (data) *data = file_data;
     if (size) *size = filesize;
+    if (mode) *mode = filemode;
     return next;
 }
 
@@ -106,7 +109,7 @@ size_t cpio_size(void) {
     const char *ptr = cpio_base;
     const char *next;
 
-    while ((next = cpio_next(ptr, 0, 0, 0)) != 0) ptr = next;
+    while ((next = cpio_next(ptr, 0, 0, 0, 0)) != 0) ptr = next;
 
     /* cpio_next stops at the trailer without consuming it, so add the trailer
      * entry's own header and name to get the true end. */
@@ -132,7 +135,7 @@ void cpio_ls(void) {
     const char *name;
     uint32_t size;
 
-    while ((ptr = cpio_next(ptr, &name, 0, &size)) != 0) {
+    while ((ptr = cpio_next(ptr, &name, 0, &size, 0)) != 0) {
         /* `find .` puts the directory itself in the archive as "."; listing it
          * is noise, so skip it the way ls without -a would. */
         if (strcmp(name, ".") == 0) continue;
@@ -151,7 +154,7 @@ int cpio_lookup(const char *path, const char **data, size_t *size) {
     const char *name, *file_data;
     uint32_t file_size;
 
-    while ((ptr = cpio_next(ptr, &name, &file_data, &file_size)) != 0) {
+    while ((ptr = cpio_next(ptr, &name, &file_data, &file_size, 0)) != 0) {
         /* Archives built with `find .` prefix every name with "./", so accept
          * the plain name the user is likely to type as well. */
         if (strcmp(name, path) == 0 ||

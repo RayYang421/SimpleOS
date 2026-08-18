@@ -19,6 +19,16 @@ size_t cpio_size(void);
 
 void cpio_ls(void);
 
+/* Walks the archive one entry at a time. Start at cpio_get_base(); the return
+ * value is the next entry, or NULL at the end. Any out parameter may be null.
+ * The mode is the stat mode: CPIO_MODE_DIR distinguishes a directory from an
+ * empty file, which the name alone cannot. */
+#define CPIO_MODE_FMT 0170000u
+#define CPIO_MODE_DIR 0040000u
+
+const char *cpio_next(const char *ptr, const char **name, const char **data,
+                      uint32_t *size, uint32_t *mode);
+
 /* Returns 0 when path is found, filling in the data pointer and size,
  * and -1 otherwise. */
 int cpio_lookup(const char *path, const char **data, size_t *size);

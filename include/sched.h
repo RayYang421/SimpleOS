@@ -3,6 +3,7 @@
 
 #include "types.h"
 #include "exception.h"
+#include "vfs.h"
 
 #define KSTACK_SIZE 0x4000      /* 16 KiB */
 
@@ -49,6 +50,12 @@ struct thread {
     /* Where the thread's user-mode register state lives while it is in the
      * kernel: the top of its own kernel stack. */
     struct trap_frame *tf;
+
+    /* The files this process has open and the directory it is standing in.
+     * Both are its own: fd 3 names a different file in each process, and so
+     * does a relative path. */
+    struct file  *fds[MAX_FD];
+    struct vnode *cwd;
 
     /* Signal handlers, and the frame stashed while one is running. */
     void (*sig_handler[MAX_SIGNALS])(void);

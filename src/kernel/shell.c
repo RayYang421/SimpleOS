@@ -15,6 +15,7 @@
 #include "signal.h"
 #include "mbox.h"
 #include "vm.h"
+#include "vfs.h"
 #include "mmu.h"
 
 #define CMD_MAX   256
@@ -100,6 +101,7 @@ static void cmd_help(void) {
     uart_puts("kill <pid>               : send SIGKILL to a thread\n");
     uart_puts("mbox                     : board info through the VideoCore mailbox\n");
     uart_puts("vm [pid]                 : show a process's address space\n");
+    uart_puts("fs <cmd> [args]          : ls, cat, write, mkdir, mount, cd on the VFS\n");
     uart_puts("reboot                   : reset the board\n");
 }
 
@@ -581,6 +583,64 @@ static void cmd_vm(int argc, char **argv) {
     if (found == 0) uart_puts("no process has an address space right now\n");
 }
 
+/* One command with subcommands rather than six top-level ones, since they only
+ * make sense together. */
+static void cmd_fs(int argc, char **argv) {
+    struct file *f;
+
+    if (argc < 2) {
+        uart_puts("usage: fs ls|cat|write|mkdir|mount|cd <args>\n");
+        return;
+    }
+
+    if (strcmp(argv[1], "ls") == 0) {
+        vfs_report(argc >= 3 ? argv[2] : ".");
+
+    } else if (strcmp(argv[1], "cat") == 0 && argc >= 3) {
+        if (vfs_open(argv[2], 0, &f) != 0) {
+            uart_puts("cannot open ");
+            uart_puts(argv[2]);
+            uart_puts("\n");
+            return;
+        }
+
+        char buf[128];
+        int n;
+        while ((n = vfs_read(f, buf, sizeof(buf))) > 0) uart_write(buf, (size_t)n);
+        uart_puts("\n");
+        vfs_close(f);
+
+    } else if (strcmp(argv[1], "write") == 0 && argc >= 4) {
+        if (vfs_open(argv[2], O_CREAT, &f) != 0) {
+            uart_puts("cannot open ");
+            uart_puts(argv[2]);
+            uart_puts("\n");
+            return;
+        }
+
+        int n = vfs_write(f, argv[3], strlen(argv[3]));
+        vfs_close(f);
+
+        uart_puts("wrote ");
+        uart_dec(n < 0 ? 0 : (uint64_t)n);
+        uart_puts(" byte(s)");
+        if (n < 0) uart_puts(" -- refused, the file system is read-only");
+        uart_puts("\n");
+
+    } else if (strcmp(argv[1], "mkdir") == 0 && argc >= 3) {
+        uart_puts(vfs_mkdir(argv[2]) == 0 ? "created\n" : "mkdir failed\n");
+
+    } else if (strcmp(argv[1], "mount") == 0 && argc >= 4) {
+        uart_puts(vfs_mount(argv[3], argv[2]) == 0 ? "mounted\n" : "mount failed\n");
+
+    } else if (strcmp(argv[1], "cd") == 0 && argc >= 3) {
+        uart_puts(vfs_chdir(argv[2]) == 0 ? "ok\n" : "no such directory\n");
+
+    } else {
+        uart_puts("usage: fs ls|cat|write|mkdir|mount|cd <args>\n");
+    }
+}
+
 static void cmd_mbox(void) {
     uint32_t revision, base, size;
 
@@ -639,6 +699,7 @@ void shell(void) {
         else if (strcmp(argv[0], "kill")    == 0) cmd_kill(argc, argv);
         else if (strcmp(argv[0], "mbox")    == 0) cmd_mbox();
         else if (strcmp(argv[0], "vm")      == 0) cmd_vm(argc, argv);
+        else if (strcmp(argv[0], "fs")      == 0) cmd_fs(argc, argv);
         else if (strcmp(argv[0], "meminfo") == 0) cmd_meminfo();
         else if (strcmp(argv[0], "memtest") == 0) cmd_memtest();
         else if (strcmp(argv[0], "palloc")  == 0) cmd_palloc(argc, argv);
