@@ -187,24 +187,34 @@ static void fat_set(uint32_t cluster, uint32_t value) {
 
 /* --- following a chain -------------------------------------------------------
  *
- * A chain that leads back into itself would be followed for ever. A second
- * cursor stepping half as often lands on the first within one lap of any loop,
- * which finds it in the length of the loop rather than the length of the
- * volume -- and since a chain longer than the volume has clusters must repeat
- * one, a loop is the only way a walk can fail to end. */
+ * A chain that leads back into itself would be followed for ever. Two bounds
+ * stop that. The step counter is the plain one: a chain cannot be longer than
+ * the volume has clusters, so a walk that takes more steps than that is
+ * corrupt whatever it looks like. The second cursor, stepping half as often,
+ * lands on the first within one lap of any loop, which catches the same fault
+ * in the length of the loop rather than the length of the volume -- on a large
+ * card the difference is between failing at once and appearing to hang, which
+ * is the very thing being guarded against. */
 struct chain {
     uint32_t trailing;
+    uint32_t steps;
     int      half_step;
 };
 
 static void chain_start(struct chain *c, uint32_t first) {
     c->trailing  = first;
+    c->steps     = 0;
     c->half_step = 0;
 }
 
 /* Moves *cluster on by one. Returns -1 when the chain has been caught leading
  * back into itself. */
 static int chain_advance(struct chain *c, uint32_t *cluster) {
+    if (++c->steps >= fat.clusters) {
+        fat_corrupt("a cluster chain is longer than the volume");
+        return -1;
+    }
+
     *cluster = fat_get(*cluster);
 
     if (c->half_step) c->trailing = fat_get(c->trailing);
